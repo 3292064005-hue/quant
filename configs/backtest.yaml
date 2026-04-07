@@ -1,0 +1,4 @@
+metrics:
+  annual_trading_days: 252
+  risk_free_rate: 0.0
+report_name_template: "{strategy_id}_{run_id}_backtest.json"
