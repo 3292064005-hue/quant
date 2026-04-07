@@ -1,0 +1,10 @@
+provider: csv
+adj_type: ""
+default_exchange: SSE
+default_csv_encoding: utf-8
+tushare_token: null
+tushare_token_env: TUSHARE_TOKEN
+max_symbols_per_run: null
+request_timeout_seconds: 15.0
+allow_degraded_data: true
+fail_on_degraded_data: false

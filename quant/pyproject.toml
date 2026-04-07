@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a-share-quant-workstation"
+version = "0.2.1"
+description = "A-share quantitative research and execution workstation"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "OpenAI ChatGPT" }
+]
+dependencies = [
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "pydantic>=2.0",
+  "PyYAML>=6.0"
+]
+
+[project.optional-dependencies]
+ui = ["PySide6>=6.6"]
+tushare = ["tushare>=1.4"]
+akshare = ["akshare>=1.15"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["a_share_quant*"]
+
+[tool.setuptools.package-data]
+"a_share_quant" = ["schema.sql"]
+
+[project.scripts]
+a-share-quant = "a_share_quant.cli:main_app"
+a-share-quant-check-runtime = "a_share_quant.cli:main_check_runtime"
+a-share-quant-init-db = "a_share_quant.cli:main_init_db"
+a-share-quant-sync-market-data = "a_share_quant.cli:main_sync_market_data"
+a-share-quant-daily-run = "a_share_quant.cli:main_daily_run"
+a-share-quant-generate-report = "a_share_quant.cli:main_generate_report"
+a-share-quant-launch-ui = "a_share_quant.cli:main_launch_ui"

@@ -1,4 +1,0 @@
-provider: ptrade
-endpoint: ""
-account_id: ""
-operation_timeout_seconds: 15.0

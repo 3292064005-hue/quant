@@ -1,0 +1,6 @@
+provider: ptrade
+endpoint: ''
+account_id: ''
+operation_timeout_seconds: 15.0
+strict_contract_mapping: true
+client_factory: null
