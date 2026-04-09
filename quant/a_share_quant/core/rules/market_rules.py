@@ -1,32 +1,38 @@
 """市场规则。"""
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 
 from a_share_quant.core.utils import floor_to_lot
 from a_share_quant.domain.models import Bar, OrderSide, Security
 
 
 class MarketRules:
-    """A 股交易基础规则。
-
-    当前实现覆盖：
-    - 主板默认 100 股一手；科创板默认 200 股一手。
-    - 主板默认 10% 涨跌幅；ST 5%；创业板/科创板 20%。
-
-    Notes:
-        对于上市首日及部分特殊情形的“无涨跌幅限制”，优先使用数据源
-        提供的涨跌停价/布尔标志。若数据源无法提供，则本模块只做常规
-        价格笼子与涨跌幅的静态推断，不将例外情形伪装成已精确覆盖。
-    """
+    """A 股交易基础规则。"""
 
     MAIN_BOARD_LOT_SIZE: int = 100
     STAR_BOARD_LOT_SIZE: int = 200
 
+    _MAIN_BOARD_ALIASES = {"主板", "MAIN", "MAIN_BOARD", "MAIN BOARD"}
+    _CHINEXT_ALIASES = {"创业板", "CHI", "CHINEXT", "CHI NEXT"}
+    _STAR_BOARD_ALIASES = {"科创板", "STAR", "STAR MARKET", "STAR_BOARD"}
+
+    @classmethod
+    def normalize_board(cls, board: str | None) -> str:
+        """把外部 board 别名规范化为统一枚举。"""
+        normalized = str(board or "").strip().upper()
+        if normalized in {item.upper() for item in cls._STAR_BOARD_ALIASES}:
+            return "科创板"
+        if normalized in {item.upper() for item in cls._CHINEXT_ALIASES}:
+            return "创业板"
+        if normalized in {item.upper() for item in cls._MAIN_BOARD_ALIASES}:
+            return "主板"
+        return str(board or "主板").strip() or "主板"
+
     @classmethod
     def get_lot_size(cls, security: Security | None) -> int:
         """返回证券最小交易单位。"""
-        if security and security.board in {"科创板", "STAR", "STAR Market"}:
+        if security and cls.normalize_board(security.board) == "科创板":
             return cls.STAR_BOARD_LOT_SIZE
         return cls.MAIN_BOARD_LOT_SIZE
 
@@ -42,12 +48,7 @@ class MarketRules:
         security: Security | None = None,
         current_quantity: int | None = None,
     ) -> int:
-        """按卖出规则规范化数量。
-
-        Boundary Behavior:
-            - 常规情况下按最小交易单位向下取整。
-            - 若本次卖出即清仓，则允许最后不足一手的残余股一次性卖出。
-        """
+        """按卖出规则规范化数量。"""
         desired = int(quantity)
         if current_quantity is not None and desired >= current_quantity > 0:
             return current_quantity
@@ -65,12 +66,12 @@ class MarketRules:
             return bar.limit_up
         return bar.limit_down
 
-    @staticmethod
-    def price_limit_ratio(security: Security | None) -> float:
+    @classmethod
+    def price_limit_ratio(cls, security: Security | None) -> float:
         """返回常规日涨跌幅比例。"""
         if security and security.is_st:
             return 0.05
-        if security and security.board in {"科创板", "创业板", "STAR", "ChiNext", "STAR Market"}:
+        if security and cls.normalize_board(security.board) in {"科创板", "创业板"}:
             return 0.20
         return 0.10
 

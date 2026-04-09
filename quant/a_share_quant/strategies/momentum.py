@@ -6,7 +6,7 @@ from datetime import date
 
 from a_share_quant.domain.models import Bar, Security, TargetPosition
 from a_share_quant.engines.factor_engine import FactorEngine
-from a_share_quant.strategies.base import StrategyBase
+from a_share_quant.strategies.base import StrategyBase, StrategyComponentManifest
 
 
 @dataclass(slots=True)
@@ -17,6 +17,20 @@ class TopNMomentumStrategy(StrategyBase):
     lookback: int
     top_n: int
     holding_days: int = 1
+
+    @classmethod
+    def component_manifest(cls) -> StrategyComponentManifest:
+        """返回当前内置动量策略的组件声明。"""
+        return StrategyComponentManifest(
+            universe_component="builtin.all_active_a_share",
+            signal_component="builtin.top_n_selection",
+            factor_component="builtin.momentum",
+            portfolio_construction_component="builtin.equal_weight_top_n",
+            execution_policy_component="builtin.close_fill_mock",
+            risk_gate_component="builtin.pre_trade_risk",
+            benchmark_component="builtin.daily_close_relative",
+            capability_tags=["research", "momentum", "top_n", "daily_bar"],
+        )
 
     def required_history_bars(self) -> int:
         return self.lookback + 1

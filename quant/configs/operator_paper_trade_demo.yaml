@@ -1,0 +1,4 @@
+extends: operator_paper_trade.yaml
+broker:
+  client_factory: a_share_quant.demo.operator_demo_broker:create_client
+  event_source_mode: auto

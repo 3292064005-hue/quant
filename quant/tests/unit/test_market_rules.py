@@ -1,4 +1,3 @@
-from datetime import date
 
 from a_share_quant.core.rules.market_rules import MarketRules
 from a_share_quant.domain.models import Security

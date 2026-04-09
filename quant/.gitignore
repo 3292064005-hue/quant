@@ -7,3 +7,12 @@ __pycache__/
 *.sqlite3
 reports/
 runtime/
+build/
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+
+.*_staging/

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol, cast
 
 import yaml
 
 from a_share_quant.adapters.broker.ptrade_adapter import PTradeAdapter
 from a_share_quant.adapters.broker.qmt_adapter import QMTAdapter
+from a_share_quant.cli import _build_runtime_results, main_check_runtime
 from a_share_quant.core.broker_client_loader import load_broker_client
-from a_share_quant.core.runtime_checks import check_broker_runtime, check_data_provider_runtime, check_ui_runtime
+from a_share_quant.core.runtime_checks import check_broker_runtime, check_data_provider_runtime, check_ui_runtime, summarize_runtime_results
 
+
+class _HeartbeatClient(Protocol):
+    def heartbeat(self) -> bool: ...
 
 class _BrokerClient:
     def get_account(self, last_prices):
@@ -71,6 +77,23 @@ def test_check_broker_runtime_supports_shallow_validation_for_cli() -> None:
     )
     assert result.ok is True
     assert result.details["mode"] == "shallow"
+    assert result.capability.config_ok is True
+    assert result.capability.boundary_ok is True
+    assert result.capability.client_contract_ok is False
+    assert result.capability.operable_ok is False
+
+
+def test_main_check_runtime_strict_requires_operable_ok_for_real_broker(temp_config_dir: Path) -> None:
+    app_config_path = temp_config_dir / "app.yaml"
+    payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
+    payload.setdefault("app", {})["runtime_mode"] = "paper_trade"
+    payload.setdefault("broker", {})["provider"] = "qmt"
+    payload["broker"]["endpoint"] = "tcp://127.0.0.1:1234"
+    payload["broker"]["account_id"] = "demo"
+    app_config_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    exit_code = main_check_runtime(["--config", str(app_config_path), "--strict"])
+    assert exit_code == 2
 
 
 def test_qmt_adapter_rejects_client_with_missing_methods() -> None:
@@ -98,7 +121,7 @@ def test_check_runtime_script_reports_configured_ui_and_provider_state(temp_conf
     script_path = Path(__file__).resolve().parents[2] / "scripts" / "check_runtime.py"
     namespace: dict[str, object] = {"__file__": str(script_path)}
     exec(compile(script_path.read_text(encoding="utf-8"), str(script_path), "exec"), namespace)
-    main = namespace["main"]
+    main = cast(Callable[[], int], namespace["main"])
 
     import sys
 
@@ -224,7 +247,8 @@ def build_client(config=None, provider=None):
     config = ConfigLoader.load(app_path)
     client = load_broker_client(config)
     assert client is not None
-    assert client.heartbeat() is True
+    typed_client = cast(_HeartbeatClient, client)
+    assert typed_client.heartbeat() is True
 
 
 def test_check_broker_runtime_rejects_invalid_runtime_mode_provider_combo() -> None:
@@ -232,3 +256,37 @@ def test_check_broker_runtime_rejects_invalid_runtime_mode_provider_combo() -> N
     assert result.ok is False
     assert "不允许使用 mock broker" in result.message
 
+
+
+def test_build_runtime_results_uses_same_runtime_mode_validation_for_ui_and_cli(temp_config_dir: Path) -> None:
+    app_path = temp_config_dir / "app.yaml"
+    payload = yaml.safe_load(app_path.read_text(encoding="utf-8"))
+    payload.setdefault("broker", {})["provider"] = "qmt"
+    payload["broker"]["endpoint"] = "tcp://127.0.0.1:1234"
+    payload["broker"]["account_id"] = "demo"
+    app_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    from a_share_quant.config.loader import ConfigLoader
+
+    config = ConfigLoader.load(app_path)
+    results = _build_runtime_results(config)
+    broker_result = next(item for item in results if item["name"] == "broker")
+    assert broker_result["ok"] is False
+    assert "research_backtest 模式下 broker.provider 必须为 mock" in broker_result["message"]
+
+
+def test_runtime_result_summary_exposes_layered_operability() -> None:
+    shallow = check_broker_runtime(
+        "qmt",
+        endpoint="tcp://127.0.0.1:1234",
+        account_id="demo",
+        injected_client=None,
+        allow_shallow_client_check=True,
+    )
+    summary = summarize_runtime_results([shallow.to_dict()])
+    assert summary == {
+        "config_ok": True,
+        "boundary_ok": True,
+        "client_contract_ok": False,
+        "operable_ok": False,
+    }

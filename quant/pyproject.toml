@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a-share-quant-workstation"
-version = "0.2.1"
+dynamic = ["version"]
 description = "A-share quantitative research and execution workstation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,15 +22,20 @@ dependencies = [
 ui = ["PySide6>=6.6"]
 tushare = ["tushare>=1.4"]
 akshare = ["akshare>=1.15"]
+dev = ["pytest>=9.0", "ruff>=0.12", "mypy>=1.10"]
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "a_share_quant.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["a_share_quant*"]
 
 [tool.setuptools.package-data]
 "a_share_quant" = ["schema.sql"]
+"a_share_quant.resources" = ["configs/*.yaml", "configs/*.json", "configs/broker/*.yaml"]
 
 [project.scripts]
 a-share-quant = "a_share_quant.cli:main_app"
@@ -40,3 +45,9 @@ a-share-quant-sync-market-data = "a_share_quant.cli:main_sync_market_data"
 a-share-quant-daily-run = "a_share_quant.cli:main_daily_run"
 a-share-quant-generate-report = "a_share_quant.cli:main_generate_report"
 a-share-quant-launch-ui = "a_share_quant.cli:main_launch_ui"
+a-share-quant-research = "a_share_quant.cli:main_research"
+a-share-quant-operator-snapshot = "a_share_quant.cli:main_operator_snapshot"
+a-share-quant-operator-submit-order = "a_share_quant.cli:main_operator_submit_order"
+a-share-quant-operator-reconcile-session = "a_share_quant.cli:main_operator_reconcile_session"
+a-share-quant-operator-sync-session = "a_share_quant.cli:main_operator_sync_session"
+a-share-quant-operator-run-supervisor = "a_share_quant.cli:main_operator_run_supervisor"

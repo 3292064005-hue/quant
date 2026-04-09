@@ -1,70 +1,36 @@
-# 实施摘要
+# Implementation Summary
 
-## 本轮版本
+当前交付版本：`0.5.6`
 
-- 版本：0.2.1
-- 定位：CSV / mock / headless 的 research backtest 工作站底座
+## 本轮实际完成
 
-## 本轮落地的主线
+- 已把 research/backtest 与 paper/live 的共享执行合同正式收口到 `SharedExecutionContractService`：
+  - 回测主链统一通过它解析 `required_history_bars / should_rebalance / generate_targets`
+  - operator 主链统一通过它执行基础 pre-trade 输入校验与 `projected target weights` 估算
+  - 两条主链仍保持独立 orchestrator，但不再各自维护一份轻微漂移的执行合同解析逻辑
+- 已把 release gate 从“看元数据”推进到“跑产物”：
+  - wheel 安装态现在会真实创建 venv、安装 wheel、校验 bundled config、检查 `console_scripts`
+  - 不再只读 `entry_points.txt`；而是实际执行生成后的 launcher stub
+  - 安装态也会跑 operator acceptance 链（init-db → sync-market-data → snapshot → submit → sync → supervisor）
+- 已把 optional 运行面从 import 级检查推进到真实代码路径 smoke：
+  - `PySide6` 通过本地 shim 驱动 `launch_ui.py` 完整构窗路径
+  - `tushare` / `akshare` 通过本地 shim 驱动 `sync_market_data.py` 的正式适配器路径
+  - smoke 不依赖外网，不伪装为真实第三方生产验证
+- 已保持既有交付项不回退：
+  - operator CLI preflight / clean error
+  - wheel bundled configs
+  - CSV 导入质量语义对齐
+  - 仓内 demo operator acceptance profile
 
-### P0
-- 引入 `app.runtime_mode`，明确 `research_backtest / paper_trade / live_trade` 边界
-- `BacktestEngine` 固定为 research_backtest 主链，不再隐式复用真实 broker 语义
-- research_backtest 模式强制 `broker.provider=mock`；真实 broker 收口到 runtime 校验与未来独立 orchestration
-- `backtest_runs` 写入数据谱系：`import_run_id / data_source / data_start_date / data_end_date / dataset_digest / degradation_flags / warnings`
+## 本轮验证
 
-### P1
-- `benchmark_symbol` 从元数据提升为基准曲线 + 相对指标链（若基准行情可用）
-- `StrategyService` 升级为 registry / loader，支持 `strategy.class_path / strategy.params` 与策略版本持久化
-- `StrategyRepository` 支持保存、读取、列出启用策略
-- `ReportService` 写出并重建数据谱系、benchmark 曲线、运行产物清单
-
-### P2
-- `FactorEngine` 接入默认动量策略
-- `ExecutionService` 接入主调用链
-- `EventBus` 补入真实消费者，消除“只有发布没有消费”的状态
-- 文档同步为 research-first 语义，清除真实 broker 被 `daily_run` 隐式支持的旧表述
-
-## 新增/重点变更文件
-
-- `a_share_quant/config/models.py`
-- `a_share_quant/app/bootstrap.py`
-- `a_share_quant/cli.py`
-- `a_share_quant/domain/models.py`
-- `a_share_quant/services/data_service.py`
-- `a_share_quant/services/backtest_service.py`
-- `a_share_quant/services/report_service.py`
-- `a_share_quant/services/strategy_service.py`
-- `a_share_quant/repositories/backtest_run_repository.py`
-- `a_share_quant/repositories/data_import_repository.py`
-- `a_share_quant/repositories/strategy_repository.py`
-- `a_share_quant/engines/backtest_engine.py`
-- `a_share_quant/core/metrics.py`
-- `a_share_quant/storage/sqlite_store.py`
-- `a_share_quant/schema.sql`
-
-## 验证
-
-- `pytest -q`：61 passed
-- `python -m compileall -q a_share_quant tests`：通过
-- 脚本烟测：
-  - `python scripts/init_db.py --config configs/app.yaml`
-  - `python scripts/check_runtime.py --config configs/app.yaml --strict`
-  - `python scripts/sync_market_data.py --config configs/app.yaml --csv sample_data/daily_bars.csv`
-  - `python scripts/daily_run.py --config configs/app.yaml --skip-import`
-  - `python scripts/generate_report.py --config configs/app.yaml`
-- wheel 构建：`python -m pip wheel . -w dist` 通过
+- `pytest -q`：通过
+- `pytest --collect-only -q`：`174 tests collected`
+- `python scripts/verify_release.py`：通过
 
 ## 未真实环境验证
 
-- PySide6 真桌面交互
-- Tushare / AKShare 在线拉取
-- QMT / PTrade 真终端联调
-
-## 本轮补充修正
-
-- 修复失败导入批次被错误挂接到后续回测谱系的问题：仅引用最近一次 `COMPLETED` 导入运行
-- 修复首次写出的报告文件 `artifacts.report_paths` 为空的问题：报告文件与 DB artifact 清单现已同源一致
-- `check_runtime` 新增 `runtime_mode / broker.provider` 组合合法性校验，消除误绿灯
-- 研究回测 CLI 去除 `--broker-client-factory` 噪声参数；真实 broker factory 保留在 `check_runtime` / 未来 paper-live 边界
-- 策略 loader 增加通用 `strategy.params` 参数契约，外部策略不再受限于固定四个初始化参数
+- 真 QMT / PTrade 客户端联调
+- 真 PySide6 桌面渲染与用户交互
+- 真 Tushare / AKShare 在线访问与配额/网络条件
+- Docker 镜像真实构建运行

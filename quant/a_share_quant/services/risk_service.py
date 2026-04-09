@@ -5,9 +5,11 @@ from a_share_quant.config.models import BacktestSection, RiskSection
 from a_share_quant.core.rules.risk_rules import (
     BlockedSecurityRule,
     KillSwitchRule,
+    LotSizeRule,
     MaxOrderValueRule,
     MaxPositionWeightRule,
     PriceLimitRule,
+    RiskRule,
     STBlockRule,
     TradingAvailabilityRule,
 )
@@ -22,7 +24,9 @@ class RiskService:
         self.backtest_config = backtest_config
 
     def build_engine(self) -> RiskEngine:
-        rules = [KillSwitchRule(), BlockedSecurityRule()]
+        rules: list[RiskRule] = [KillSwitchRule(), BlockedSecurityRule()]
+        if self.risk_config.rules.enforce_lot_size:
+            rules.append(LotSizeRule())
         if self.risk_config.rules.block_st:
             rules.append(STBlockRule())
         if self.risk_config.rules.block_suspended:

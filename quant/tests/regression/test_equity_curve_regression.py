@@ -7,9 +7,12 @@ def test_equity_curve_regression(temp_config_dir: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     context = bootstrap(str(temp_config_dir / "app.yaml"))
     try:
-        context.data_service.import_csv(project_root / "sample_data" / "daily_bars.csv")
-        strategy = context.strategy_service.build_default()
-        result = context.backtest_service.run(strategy)
+        data_service = context.require_data_service()
+        strategy_service = context.require_strategy_service()
+        backtest_service = context.require_backtest_service()
+        data_service.import_csv(project_root / "sample_data" / "daily_bars.csv")
+        strategy = strategy_service.build_default()
+        result = backtest_service.run(strategy)
         assert round(result.equity_curve[-1], 2) >= 1000000.00
         assert round(result.metrics["max_drawdown"], 4) <= 0.0
         rows = context.store.query(

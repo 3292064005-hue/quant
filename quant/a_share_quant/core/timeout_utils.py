@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import atexit
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from threading import Lock
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from a_share_quant.core.exceptions import ExternalServiceTimeoutError
 

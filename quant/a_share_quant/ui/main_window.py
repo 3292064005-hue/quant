@@ -1,21 +1,37 @@
-"""桌面原型主窗口。"""
+"""桌面只读运营面板主窗口。"""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from a_share_quant.config.models import AppConfig
+from a_share_quant.ui.panels import (
+    build_boundary_panel,
+    build_config_panel,
+    build_import_audit_panel,
+    build_order_monitor_panel,
+    build_report_replay_panel,
+    build_risk_alert_panel,
+    build_runtime_health_panel,
+    build_strategy_lifecycle_panel,
+)
 
 
-def build_main_window(*, config: AppConfig, runtime_results: list[dict[str, Any]] | None = None) -> object:
-    """构建桌面原型主窗口。
+def build_main_window(
+    *,
+    config: AppConfig,
+    runtime_results: list[dict[str, Any]] | None = None,
+    operations_snapshot: dict[str, Any] | None = None,
+) -> object:
+    """构建桌面只读运营面板主窗口。
 
     功能:
-        展示配置摘要、运行时检查结果以及当前桌面层边界说明。
+        展示配置摘要、运行时检查结果、Provider/Workflow/Plugin 状态、导入审计、
+        最近回测与当前桌面层边界说明。
 
     Args:
         config: 已解析的应用配置。
         runtime_results: 运行时检查结果列表，可为空。
+        operations_snapshot: 只读运维摘要，可为空。
 
     Returns:
         `QMainWindow` 实例。
@@ -23,81 +39,23 @@ def build_main_window(*, config: AppConfig, runtime_results: list[dict[str, Any]
     Raises:
         ImportError: 当前环境未安装 PySide6 时抛出。
     """
-    from PySide6.QtWidgets import QLabel, QMainWindow, QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget
+    from PySide6.QtWidgets import QMainWindow, QTabWidget
 
     runtime_results = runtime_results or []
+    operations_snapshot = operations_snapshot or {}
+
     window = QMainWindow()
-    window.setWindowTitle("A 股量化研究与交易工作站 - 桌面原型（未接交易主链）")
+    window.setWindowTitle("A 股量化研究与交易工作站 - 桌面只读运营面板")
     tabs = QTabWidget()
-
-    config_summary = {
-        "app": {
-            "name": config.app.name,
-            "environment": config.app.environment,
-            "timezone": config.app.timezone,
-            "logs_dir": config.app.logs_dir,
-        },
-        "data": {
-            "provider": config.data.provider,
-            "storage_dir": config.data.storage_dir,
-            "reports_dir": config.data.reports_dir,
-        },
-        "database": {"path": config.database.path},
-        "backtest": {
-            "data_access_mode": config.backtest.data_access_mode,
-            "report_name_template": config.backtest.report_name_template,
-            "benchmark_symbol": config.backtest.benchmark_symbol,
-        },
-        "broker": {
-            "provider": config.broker.provider,
-            "endpoint": config.broker.endpoint,
-            "account_id": config.broker.account_id,
-            "strict_contract_mapping": config.broker.strict_contract_mapping,
-        },
-    }
-
-    tabs.addTab(
-        _build_readonly_page(
-            title="原型边界",
-            body=(
-                "当前窗口是桌面原型，不承载回测/下单/报表重建业务操作。\n\n"
-                "它只做三件事：\n"
-                "1. 展示已解析配置\n"
-                "2. 展示运行时健康检查结果\n"
-                "3. 明确告知桌面层尚未接入交易主链，避免误判为可操作工作台\n"
-            ),
-        ),
-        "边界说明",
-    )
-    tabs.addTab(
-        _build_readonly_page(
-            title="配置摘要",
-            body=json.dumps(config_summary, ensure_ascii=False, indent=2),
-        ),
-        "配置摘要",
-    )
-    tabs.addTab(
-        _build_readonly_page(
-            title="运行时检查",
-            body=json.dumps(runtime_results, ensure_ascii=False, indent=2),
-        ),
-        "运行时检查",
-    )
+    tabs.addTab(build_boundary_panel(), "边界说明")
+    tabs.addTab(build_config_panel(config), "配置摘要")
+    tabs.addTab(build_runtime_health_panel(runtime_results), "运行时健康")
+    tabs.addTab(build_strategy_lifecycle_panel(operations_snapshot), "策略生命周期")
+    tabs.addTab(build_order_monitor_panel(operations_snapshot), "订单执行")
+    tabs.addTab(build_risk_alert_panel(operations_snapshot), "风险告警")
+    tabs.addTab(build_import_audit_panel(operations_snapshot), "导入审计")
+    tabs.addTab(build_report_replay_panel(operations_snapshot), "报告与回放")
 
     window.setCentralWidget(tabs)
-    window.resize(1280, 800)
+    window.resize(1440, 900)
     return window
-
-
-def _build_readonly_page(*, title: str, body: str) -> object:
-    from PySide6.QtWidgets import QLabel, QPlainTextEdit, QVBoxLayout, QWidget
-
-    page = QWidget()
-    layout = QVBoxLayout(page)
-    label = QLabel(title)
-    editor = QPlainTextEdit()
-    editor.setReadOnly(True)
-    editor.setPlainText(body)
-    layout.addWidget(label)
-    layout.addWidget(editor)
-    return page

@@ -8,9 +8,9 @@ import pandas as pd
 
 from a_share_quant.adapters.data.base import MarketDataBundle
 from a_share_quant.core.exceptions import DataValidationError
+from a_share_quant.core.rules.market_rules import MarketRules
 from a_share_quant.core.utils import parse_yyyymmdd
 from a_share_quant.domain.models import Bar, Security
-
 
 REQUIRED_COLUMNS = {
     "ts_code",
@@ -67,7 +67,7 @@ class CSVDataAdapter:
                     ts_code=ts_code,
                     name=str(row["name"]),
                     exchange=str(row["exchange"]),
-                    board=str(row["board"]),
+                    board=MarketRules.normalize_board(str(row["board"])),
                     is_st=bool(row["is_st"]),
                     status=str(row["status"]),
                     list_date=parse_yyyymmdd(row.get("list_date")),
@@ -91,4 +91,10 @@ class CSVDataAdapter:
                     adj_type=str(row["adj_type"]),
                 )
             )
-        return MarketDataBundle(bars=bars, securities=securities)
+        return MarketDataBundle(
+            bars=bars,
+            securities=securities,
+            degradation_flags=["calendar_inferred_from_bars"],
+            warnings=["CSV 数据未提供正式交易所日历，当前将由 bars 交易日集合推导会话"],
+            metadata={"quality_contract_version": "v1", "calendar_source": "bars_only"},
+        )

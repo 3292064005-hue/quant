@@ -10,6 +10,5 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from a_share_quant.cli import main_generate_report as main
 
-
 if __name__ == "__main__":
     raise SystemExit(main())

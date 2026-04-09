@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from a_share_quant.config.loader import ConfigLoader, ConfigLoaderError
 
@@ -58,7 +59,7 @@ def test_config_loader_rejects_invalid_runtime_enums(temp_config_dir: Path) -> N
     payload = yaml.safe_load(app_path.read_text(encoding="utf-8"))
     payload.setdefault("backtest", {})["data_access_mode"] = "invalid_mode"
     app_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ConfigLoader.load(app_path)
 
 
@@ -104,3 +105,60 @@ def test_config_loader_supports_cwd_path_resolution_mode(tmp_path: Path, monkeyp
     monkeypatch.chdir(cwd_dir)
     config = ConfigLoader.load(app_path)
     assert config.database.path == str((cwd_dir / "runtime" / "runtime.db").resolve())
+
+
+def test_config_loader_supports_extends_chain(tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(parents=True)
+    base = config_dir / "base.yaml"
+    child = config_dir / "child.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "app": {"logs_dir": "../runtime/logs", "path_resolution_mode": "config_dir", "runtime_mode": "research_backtest"},
+                "data": {"storage_dir": "../runtime/data", "reports_dir": "../runtime/reports"},
+                "database": {"path": "../runtime/base.db"},
+                "broker": {"provider": "mock"},
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    child.write_text(
+        yaml.safe_dump(
+            {
+                "extends": "base.yaml",
+                "app": {"runtime_mode": "paper_trade"},
+                "database": {"path": "../runtime/operator.db"},
+                "broker": {"provider": "qmt", "endpoint": "tcp://127.0.0.1:12345", "account_id": "demo"},
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    config = ConfigLoader.load(child)
+    assert config.app.runtime_mode == "paper_trade"
+    assert config.database.path == str((tmp_path / "runtime" / "operator.db").resolve())
+    assert config.broker.provider == "qmt"
+    assert config.broker.endpoint == "tcp://127.0.0.1:12345"
+
+
+def test_config_loader_rejects_cyclic_extends(tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(parents=True)
+    first = config_dir / "first.yaml"
+    second = config_dir / "second.yaml"
+    first.write_text(yaml.safe_dump({"extends": "second.yaml"}, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    second.write_text(yaml.safe_dump({"extends": "first.yaml"}, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigLoaderError):
+        ConfigLoader.load(first)
+
+
+def test_config_loader_falls_back_to_packaged_configs_when_repo_configs_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = ConfigLoader.load("configs/operator_paper_trade_demo.yaml")
+    assert config.app.runtime_mode == "paper_trade"
+    assert config.broker.provider == "qmt"
+    assert config.broker.client_factory == "a_share_quant.demo.operator_demo_broker:create_client"

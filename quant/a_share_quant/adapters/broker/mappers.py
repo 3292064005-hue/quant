@@ -1,14 +1,12 @@
 """券商返回载荷到领域对象的映射工具。"""
 from __future__ import annotations
 
-from dataclasses import is_dataclass
+from collections.abc import Iterable
 from datetime import date
-from enum import Enum
-from typing import Any, Iterable
+from typing import Any
 
 from a_share_quant.core.exceptions import BrokerContractError
-from a_share_quant.domain.models import AccountSnapshot, Fill, OrderRequest, OrderSide, OrderStatus, PositionSnapshot
-
+from a_share_quant.domain.models import AccountSnapshot, ExecutionReport, Fill, OrderRequest, OrderSide, OrderStatus, PositionSnapshot
 
 _ACCOUNT_FIELD_ALIASES = {
     "cash": ("cash",),
@@ -32,7 +30,8 @@ _POSITION_FIELD_ALIASES = {
 
 _FILL_FIELD_ALIASES = {
     "fill_id": ("fill_id", "trade_id", "deal_id"),
-    "order_id": ("order_id", "broker_order_id", "entrust_no"),
+    "order_id": ("order_id",),
+    "broker_order_id": ("broker_order_id", "entrust_no"),
     "trade_date": ("trade_date", "date", "trade_day"),
     "ts_code": ("ts_code", "symbol", "security_code", "stock_code"),
     "side": ("side", "direction", "bs_type"),
@@ -41,10 +40,30 @@ _FILL_FIELD_ALIASES = {
     "fee": ("fee", "commission"),
     "tax": ("tax", "stamp_tax"),
     "run_id": ("run_id",),
+    "account_id": ("account_id", "account", "fund_account"),
+}
+
+
+_REPORT_FIELD_ALIASES = {
+    "report_id": ("report_id", "event_id", "exec_id"),
+    "order_id": ("order_id",),
+    "broker_order_id": ("broker_order_id", "entrust_no"),
+    "trade_date": ("trade_date", "date", "trade_day"),
+    "status": ("status", "order_status"),
+    "requested_quantity": ("requested_quantity", "quantity", "qty", "order_qty"),
+    "filled_quantity": ("filled_quantity", "deal_qty", "filled_qty"),
+    "remaining_quantity": ("remaining_quantity", "left_qty", "remaining_qty"),
+    "message": ("message", "msg", "status_message"),
+    "fill_price": ("fill_price", "price", "deal_price"),
+    "fee_estimate": ("fee_estimate", "fee", "commission"),
+    "tax_estimate": ("tax_estimate", "tax", "stamp_tax"),
+    "account_id": ("account_id", "account", "fund_account"),
+    "metadata": ("metadata",),
 }
 
 _ORDER_FIELD_ALIASES = {
-    "order_id": ("order_id", "broker_order_id", "entrust_no"),
+    "order_id": ("order_id",),
+    "broker_order_id": ("broker_order_id", "entrust_no"),
     "trade_date": ("trade_date", "date", "trade_day"),
     "strategy_id": ("strategy_id",),
     "ts_code": ("ts_code", "symbol", "security_code", "stock_code"),
@@ -54,6 +73,7 @@ _ORDER_FIELD_ALIASES = {
     "reason": ("reason",),
     "status": ("status", "order_status"),
     "run_id": ("run_id",),
+    "account_id": ("account_id", "account", "fund_account"),
 }
 
 
@@ -209,10 +229,16 @@ def map_position_snapshots(payload: Any) -> list[PositionSnapshot]:
 
 
 def map_fill(payload: Any, *, fallback_order: OrderRequest | None = None, fallback_trade_date: date | None = None) -> Fill:
-    """将券商成交载荷映射为 ``Fill``。"""
+    """将券商成交载荷映射为 ``Fill``。
+
+    Boundary Behavior:
+        - submit_order 场景若提供 ``fallback_order``，则默认优先保留本地领域 ``order_id``；
+        - 若外部 payload 只有 ``broker_order_id``，则仍会保留该字段，供后续 reconciliation 重新绑定。
+    """
     if isinstance(payload, Fill):
         return payload
-    order_id_default = fallback_order.order_id if fallback_order is not None else None
+    broker_order_id = _read_alias(payload, _FILL_FIELD_ALIASES["broker_order_id"], default=None, required=False)
+    order_id_default = fallback_order.order_id if fallback_order is not None else broker_order_id
     trade_date_default = fallback_trade_date or (fallback_order.trade_date if fallback_order is not None else None)
     ts_code_default = fallback_order.ts_code if fallback_order is not None else None
     side_default = fallback_order.side if fallback_order is not None else None
@@ -230,6 +256,7 @@ def map_fill(payload: Any, *, fallback_order: OrderRequest | None = None, fallba
     fee = _as_float(_read_alias(payload, _FILL_FIELD_ALIASES["fee"], default=0.0, required=False), field_name="fee")
     tax = _as_float(_read_alias(payload, _FILL_FIELD_ALIASES["tax"], default=0.0, required=False), field_name="tax")
     run_id = _read_alias(payload, _FILL_FIELD_ALIASES["run_id"], default=(fallback_order.run_id if fallback_order is not None else None), required=False)
+    account_id = _read_alias(payload, _FILL_FIELD_ALIASES["account_id"], default=(fallback_order.account_id if fallback_order is not None else None), required=False)
     return Fill(
         fill_id=fill_id,
         order_id=order_id,
@@ -241,6 +268,8 @@ def map_fill(payload: Any, *, fallback_order: OrderRequest | None = None, fallba
         fee=fee,
         tax=tax,
         run_id=None if run_id is None else str(run_id),
+        broker_order_id=None if broker_order_id is None else str(broker_order_id),
+        account_id=None if account_id is None else str(account_id),
     )
 
 
@@ -261,7 +290,8 @@ def map_order_request(payload: Any) -> OrderRequest:
     """将外部订单载荷映射为 ``OrderRequest``。"""
     if isinstance(payload, OrderRequest):
         return payload
-    order_id = str(_read_alias(payload, _ORDER_FIELD_ALIASES["order_id"])).strip()
+    broker_order_id = _read_alias(payload, _ORDER_FIELD_ALIASES["broker_order_id"], default=None, required=False)
+    order_id = str(_read_alias(payload, _ORDER_FIELD_ALIASES["order_id"], default=broker_order_id, required=broker_order_id is None)).strip()
     trade_date = _as_date(_read_alias(payload, _ORDER_FIELD_ALIASES["trade_date"]), field_name="trade_date")
     strategy_id = str(_read_alias(payload, _ORDER_FIELD_ALIASES["strategy_id"], default="external", required=False)).strip() or "external"
     ts_code = str(_read_alias(payload, _ORDER_FIELD_ALIASES["ts_code"])).strip()
@@ -271,6 +301,7 @@ def map_order_request(payload: Any) -> OrderRequest:
     reason = str(_read_alias(payload, _ORDER_FIELD_ALIASES["reason"], default="external", required=False)).strip() or "external"
     status = _as_order_status(_read_alias(payload, _ORDER_FIELD_ALIASES["status"], default=OrderStatus.SUBMITTED, required=False), field_name="status")
     run_id = _read_alias(payload, _ORDER_FIELD_ALIASES["run_id"], default=None, required=False)
+    account_id = _read_alias(payload, _ORDER_FIELD_ALIASES["account_id"], default=None, required=False)
     return OrderRequest(
         order_id=order_id,
         trade_date=trade_date,
@@ -282,6 +313,8 @@ def map_order_request(payload: Any) -> OrderRequest:
         reason=reason,
         status=status,
         run_id=None if run_id is None else str(run_id),
+        broker_order_id=None if broker_order_id is None else str(broker_order_id),
+        account_id=None if account_id is None else str(account_id),
     )
 
 
@@ -295,3 +328,58 @@ def map_order_request_list(payload: Any) -> list[OrderRequest]:
     if not isinstance(payload, Iterable) or isinstance(payload, (str, bytes, dict)):
         raise BrokerContractError(f"订单载荷必须是可迭代对象，当前类型={type(payload)!r}")
     return [map_order_request(item) for item in payload]
+
+
+
+def map_execution_report(payload: Any, *, fallback_order: OrderRequest | None = None, fallback_trade_date: date | None = None) -> ExecutionReport:
+    """将 broker 执行回报载荷映射为 ``ExecutionReport``。"""
+    if isinstance(payload, ExecutionReport):
+        return payload
+    broker_order_id = _read_alias(payload, _REPORT_FIELD_ALIASES["broker_order_id"], default=None, required=False)
+    order_id_default = fallback_order.order_id if fallback_order is not None else broker_order_id
+    trade_date_default = fallback_trade_date or (fallback_order.trade_date if fallback_order is not None else None)
+    requested_default = fallback_order.quantity if fallback_order is not None else None
+    status_default = fallback_order.status if fallback_order is not None else OrderStatus.SUBMITTED
+    filled_default = fallback_order.filled_quantity if fallback_order is not None else 0
+    remaining_default = None if requested_default is None else max(int(requested_default) - int(filled_default), 0)
+    report_id = str(_read_alias(payload, _REPORT_FIELD_ALIASES["report_id"], default="external_report", required=False)).strip() or "external_report"
+    order_id = str(_read_alias(payload, _REPORT_FIELD_ALIASES["order_id"], default=order_id_default, required=order_id_default is None)).strip()
+    trade_date = _as_date(_read_alias(payload, _REPORT_FIELD_ALIASES["trade_date"], default=trade_date_default, required=trade_date_default is None), field_name="trade_date")
+    status = _as_order_status(_read_alias(payload, _REPORT_FIELD_ALIASES["status"], default=status_default, required=False), field_name="status", default=OrderStatus.SUBMITTED)
+    requested_quantity = _as_int(_read_alias(payload, _REPORT_FIELD_ALIASES["requested_quantity"], default=requested_default, required=requested_default is None), field_name="requested_quantity")
+    filled_quantity = _as_int(_read_alias(payload, _REPORT_FIELD_ALIASES["filled_quantity"], default=filled_default, required=False), field_name="filled_quantity")
+    remaining_quantity = _as_int(_read_alias(payload, _REPORT_FIELD_ALIASES["remaining_quantity"], default=max(requested_quantity - filled_quantity, 0), required=False), field_name="remaining_quantity")
+    message = str(_read_alias(payload, _REPORT_FIELD_ALIASES["message"], default="", required=False) or "")
+    fill_price_raw = _read_alias(payload, _REPORT_FIELD_ALIASES["fill_price"], default=None, required=False)
+    fee_raw = _read_alias(payload, _REPORT_FIELD_ALIASES["fee_estimate"], default=None, required=False)
+    tax_raw = _read_alias(payload, _REPORT_FIELD_ALIASES["tax_estimate"], default=None, required=False)
+    account_id = _read_alias(payload, _REPORT_FIELD_ALIASES["account_id"], default=(fallback_order.account_id if fallback_order is not None else None), required=False)
+    metadata = _read_alias(payload, _REPORT_FIELD_ALIASES["metadata"], default={}, required=False)
+    return ExecutionReport(
+        report_id=report_id,
+        order_id=order_id,
+        trade_date=trade_date,
+        status=status,
+        requested_quantity=requested_quantity,
+        filled_quantity=filled_quantity,
+        remaining_quantity=remaining_quantity,
+        message=message,
+        fill_price=None if fill_price_raw is None else _as_float(fill_price_raw, field_name="fill_price"),
+        fee_estimate=None if fee_raw is None else _as_float(fee_raw, field_name="fee_estimate"),
+        tax_estimate=None if tax_raw is None else _as_float(tax_raw, field_name="tax_estimate"),
+        broker_order_id=None if broker_order_id is None else str(broker_order_id),
+        account_id=None if account_id is None else str(account_id),
+        metadata=metadata if isinstance(metadata, dict) else {"raw_metadata": metadata},
+    )
+
+
+
+def map_execution_report_list(payload: Any) -> list[ExecutionReport]:
+    """将 broker 执行回报列表映射为 ``ExecutionReport`` 序列。"""
+    if payload is None:
+        return []
+    if isinstance(payload, list) and all(isinstance(item, ExecutionReport) for item in payload):
+        return payload
+    if not isinstance(payload, Iterable) or isinstance(payload, (str, bytes, dict)):
+        raise BrokerContractError(f"执行回报载荷必须是可迭代对象，当前类型={type(payload)!r}")
+    return [map_execution_report(item) for item in payload]

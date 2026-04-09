@@ -12,6 +12,19 @@ class DataImportRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
 
+    @staticmethod
+    def _normalize_summary_items(values: list[str] | None) -> list[str]:
+        """规范化导入摘要中的 flag/warning 列表。
+
+        Boundary Behavior:
+            - 去除空字符串；
+            - 保持稳定排序，避免同一导入在不同入口产生重复/乱序摘要；
+            - 不改变调用方的原始列表对象。
+        """
+        if not values:
+            return []
+        return sorted({str(item).strip() for item in values if str(item).strip()})
+
     def create_run(self, source: str, request_context: dict) -> str:
         """创建导入运行记录并返回 ``import_run_id``。"""
         import_run_id = new_id("import")
@@ -58,8 +71,8 @@ class DataImportRepository:
                 securities_count,
                 calendar_count,
                 bars_count,
-                json_dumps(degradation_flags or []),
-                json_dumps(warnings or []),
+                json_dumps(self._normalize_summary_items(degradation_flags)),
+                json_dumps(self._normalize_summary_items(warnings)),
                 error_message,
                 import_run_id,
             ),
@@ -96,23 +109,31 @@ class DataImportRepository:
         )
         if not rows:
             return None
-        row = rows[0]
-        return DataImportRun(**dict(row))
+        return DataImportRun(**dict(rows[0]))
 
-    def get_latest_run(self, *, status: str | None = None) -> DataImportRun | None:
-        """读取最近一次导入运行。
-
-        Args:
-            status: 可选状态过滤；例如 ``COMPLETED``。
-
-        Returns:
-            最近一条匹配状态的导入运行；若不存在则返回 ``None``。
-        """
-        sql = """
+    def list_runs(self, import_run_ids: list[str]) -> list[DataImportRun]:
+        """按给定顺序读取多条导入运行。"""
+        if not import_run_ids:
+            return []
+        placeholders = ",".join("?" for _ in import_run_ids)
+        rows = self.store.query(
+            f"""
             SELECT import_run_id, source, status, request_context_json, started_at, finished_at,
                    securities_count, calendar_count, bars_count, degradation_flags_json, warnings_json, error_message
-            FROM data_import_runs
-        """
+            FROM data_import_runs WHERE import_run_id IN ({placeholders})
+            """,
+            tuple(import_run_ids),
+        )
+        by_id = {row["import_run_id"]: DataImportRun(**dict(row)) for row in rows}
+        return [by_id[item] for item in import_run_ids if item in by_id]
+
+    def get_latest_run(self, *, status: str | None = None) -> DataImportRun | None:
+        """读取最近一次导入运行，可按状态过滤。"""
+        sql = (
+            "SELECT import_run_id, source, status, request_context_json, started_at, finished_at, "
+            "securities_count, calendar_count, bars_count, degradation_flags_json, warnings_json, error_message "
+            "FROM data_import_runs"
+        )
         params: tuple[str, ...] = ()
         if status is not None:
             sql += " WHERE status = ?"
@@ -124,5 +145,5 @@ class DataImportRepository:
         return DataImportRun(**dict(rows[0]))
 
     def get_latest_completed_run(self) -> DataImportRun | None:
-        """读取最近一次成功完成的导入运行。"""
+        """读取最近一次成功导入。"""
         return self.get_latest_run(status="COMPLETED")

@@ -18,6 +18,9 @@ def test_strategy_service_persists_registry_metadata(temp_config_dir: Path) -> N
         assert saved["class_path"] == "builtin.top_n_momentum"
         assert saved["version"] == config.strategy.version
         assert saved["params"]["lookback"] == config.strategy.lookback
+        assert saved["component_manifest"]["factor_component"] == "builtin.momentum"
+        assert "momentum" in saved["capability_tags"]
+        assert saved["strategy_blueprint"]["factor"] == "builtin.momentum"
         enabled = service.list_enabled_strategy_definitions()
         assert any(item["strategy_id"] == strategy.strategy_id for item in enabled)
 
@@ -59,3 +62,7 @@ class CustomStrategy:
         assert saved is not None
         assert saved["params"]["foo"] == "bar-value"
         assert saved["params"]["strategy_id"] == config.strategy.strategy_id
+        assert saved["component_manifest"]["signal_component"] == "builtin.direct_targets"
+        assert "external_strategy" in saved["capability_tags"]
+        assert strategy._component_manifest["portfolio_construction_component"] == "builtin.portfolio_engine"
+        assert saved["strategy_blueprint"]["signal"] == "builtin.direct_targets"

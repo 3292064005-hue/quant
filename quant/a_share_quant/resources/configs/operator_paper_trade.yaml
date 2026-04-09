@@ -1,0 +1,22 @@
+extends: app.yaml
+app:
+  runtime_mode: paper_trade
+broker:
+  provider: qmt
+  endpoint: tcp://127.0.0.1:12345
+  account_id: demo-account
+  allowed_account_ids:
+    - demo-account
+    - demo-account-2
+  client_factory: null
+  event_source_mode: auto
+operator:
+  supervisor_scan_interval_seconds: 1.0
+  supervisor_lease_seconds: 15.0
+  supervisor_heartbeat_interval_seconds: 5.0
+  supervisor_idle_timeout_seconds: 2.0
+  supervisor_max_sessions_per_pass: 10
+
+research:
+  cache_schema_version: v3
+  dataset_scope_cache_invalidation: true

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from a_share_quant.core.rules.market_rules import MarketRules
 from a_share_quant.domain.models import OrderRequest, RiskResult, Security
 
 
@@ -55,6 +56,20 @@ class TradingAvailabilityRule:
 
     def evaluate(self, order: OrderRequest, context: RiskContext) -> RiskResult:
         return RiskResult(context.can_trade, "TradingAvailabilityRule", "ERROR", "停牌或不可交易" if not context.can_trade else "通过")
+
+
+class LotSizeRule:
+    """最小交易单位规则。"""
+
+    def evaluate(self, order: OrderRequest, context: RiskContext) -> RiskResult:
+        lot_size = MarketRules.get_lot_size(context.security)
+        passed = order.quantity > 0 and order.quantity % lot_size == 0
+        return RiskResult(
+            passed,
+            "LotSizeRule",
+            "ERROR",
+            f"订单数量 {order.quantity} 不符合最小交易单位 {lot_size}" if not passed else "通过",
+        )
 
 
 class PriceLimitRule:

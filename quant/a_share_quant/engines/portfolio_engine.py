@@ -57,7 +57,8 @@ class PortfolioEngine:
                 continue
             current = context.positions.get(ts_code)
             current_qty = current.quantity if current else 0
-            target_weight = target_map.get(ts_code).target_weight if ts_code in target_map else 0.0
+            target = target_map.get(ts_code)
+            target_weight = target.target_weight if target is not None else 0.0
             target_value = total_assets * target_weight
             raw_target_qty = int(target_value / bar.close)
             if self.enforce_lot_size:
@@ -76,7 +77,7 @@ class PortfolioEngine:
                     qty = MarketRules.normalize_sell_quantity(qty, security, current_qty)
             if qty <= 0:
                 continue
-            reason = target_map[ts_code].reason if ts_code in target_map else "目标仓位为 0，执行清仓"
+            reason = target.reason if target is not None else "目标仓位为 0，执行清仓"
             order = OrderRequest(
                 order_id=new_id("order"),
                 trade_date=context.trade_date,

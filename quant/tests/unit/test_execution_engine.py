@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import date
 
 from a_share_quant.adapters.broker.mock_broker import MockBroker
-from a_share_quant.engines.execution_engine import ExecutionEngine
 from a_share_quant.domain.models import OrderRequest, OrderSide, OrderStatus
+from a_share_quant.engines.execution_engine import ExecutionEngine
 
 
 def test_execution_engine_rejects_order_when_bar_missing() -> None:

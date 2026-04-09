@@ -1,6 +1,7 @@
 """配置加载器。"""
 from __future__ import annotations
 
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,10 @@ class ConfigLoader:
     """YAML 配置加载器。
 
     合并规则：
-        默认值 < companion 文件 < app.yaml 主配置。
+        默认值 < companion 文件 < 基础配置链 < 当前主配置。
 
-    这样可以保证：
-        1. `data.yaml` / `risk.yaml` / `backtest.yaml` / `broker/<provider>.yaml` 能提供按主题拆分的基线配置。
-        2. `app.yaml` 作为总入口时，用户在主配置中的覆盖值一定生效，不会被 companion 文件反向覆盖。
+    其中基础配置链由 ``extends`` 明确指定，可用于把 ``paper/live`` 变体配置建立在
+    ``configs/app.yaml`` 之上，避免维护整份重复 YAML。
     """
 
     @staticmethod
@@ -30,23 +30,74 @@ class ConfigLoader:
         """从 YAML 文件读取应用配置。
 
         Args:
-            path: 主配置文件路径。当前约定主入口为 ``configs/app.yaml``。
+            path: 主配置文件路径。默认约定主入口为 ``configs/app.yaml``。
 
         Returns:
             ``AppConfig`` 实例。所有运行时路径字段会在此阶段被解析为绝对路径。
 
         Raises:
-            ConfigLoaderError: 当路径不存在、无法解析、内容不是映射结构或路径模式非法时抛出。
+            ConfigLoaderError: 当路径不存在、无法解析、内容不是映射结构、extends 非法或路径模式非法时抛出。
         """
-        config_path = Path(path).resolve()
-        payload = ConfigLoader._load_yaml_mapping(config_path)
-        if config_path.name == "app.yaml":
-            payload = ConfigLoader._merge_companion_files(config_path, payload)
+        config_path = ConfigLoader._resolve_config_path(path)
+        payload = ConfigLoader._load_with_extends(config_path, stack=())
         try:
             payload = normalize_runtime_paths(payload, config_path=config_path)
         except ValueError as exc:
             raise ConfigLoaderError(str(exc)) from exc
         return AppConfig.model_validate(payload)
+
+
+    @staticmethod
+    def _resolve_config_path(path: str | Path) -> Path:
+        """解析配置路径；当外部路径缺失时回退到 wheel 内置配置目录。
+
+        Boundary Behavior:
+            - 绝对路径只接受真实存在的文件，不做隐式映射。
+            - 相对路径若在当前工作目录不存在，会尝试映射到 ``a_share_quant.resources/configs``。
+            - 支持 ``configs/*.yaml`` 与同目录 companion/broker 配置的安装态加载。
+        """
+        candidate = Path(path)
+        if candidate.exists():
+            return candidate.resolve()
+        if candidate.is_absolute():
+            raise ConfigLoaderError(f"配置文件不存在: {candidate}")
+
+        resource_root = Path(str(resources.files("a_share_quant.resources").joinpath("configs")))
+        candidate_parts = list(candidate.parts)
+        if candidate_parts[:1] == ["configs"]:
+            candidate_parts = candidate_parts[1:]
+        bundled = resource_root.joinpath(*candidate_parts) if candidate_parts else resource_root
+        if bundled.exists():
+            return bundled.resolve()
+        raise ConfigLoaderError(f"配置文件不存在: {candidate.resolve()}")
+
+    @staticmethod
+    def _load_with_extends(path: Path, *, stack: tuple[Path, ...]) -> dict[str, Any]:
+        """递归解析 ``extends`` 并应用 companion 文件。"""
+        if path in stack:
+            chain = " -> ".join(item.name for item in (*stack, path))
+            raise ConfigLoaderError(f"检测到循环 extends 配置链: {chain}")
+        payload = ConfigLoader._load_yaml_mapping(path)
+        extends_value = payload.pop("extends", None)
+        merged_base: dict[str, Any] = {}
+        if extends_value is not None:
+            if isinstance(extends_value, (str, Path)):
+                extend_refs = [extends_value]
+            elif isinstance(extends_value, list) and all(isinstance(item, (str, Path)) for item in extends_value):
+                extend_refs = list(extends_value)
+            else:
+                raise ConfigLoaderError(f"extends 必须是字符串或字符串列表: {path}")
+            for ref in extend_refs:
+                ref_path = Path(ref)
+                if not ref_path.is_absolute():
+                    ref_path = (path.parent / ref_path).resolve()
+                merged_base = ConfigLoader._deep_merge_dicts(
+                    merged_base,
+                    ConfigLoader._load_with_extends(ref_path, stack=(*stack, path)),
+                )
+        if path.name == "app.yaml":
+            payload = ConfigLoader._merge_companion_files(path, payload)
+        return ConfigLoader._deep_merge_dicts(merged_base, payload)
 
     @staticmethod
     def _merge_companion_files(config_path: Path, payload: dict[str, Any]) -> dict[str, Any]:

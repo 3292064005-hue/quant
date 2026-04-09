@@ -1,0 +1,7 @@
+rules:
+  enforce_lot_size: true
+  block_st: true
+  block_suspended: true
+  block_limit_up_buy: true
+  block_limit_down_sell: true
+  sequential_cash_reservation: true

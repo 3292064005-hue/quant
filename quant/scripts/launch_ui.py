@@ -1,4 +1,4 @@
-"""桌面原型 UI 启动脚本。"""
+"""桌面只读运营面板启动脚本。"""
 from __future__ import annotations
 
 import sys
@@ -9,7 +9,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from a_share_quant.cli import main_launch_ui as main
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

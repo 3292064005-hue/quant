@@ -1,18 +1,19 @@
 """通用工具函数。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import uuid
 from dataclasses import asdict, is_dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 def now_iso() -> str:
     """返回当前 UTC ISO 时间字符串。"""
-    return datetime.now(UTC).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def ensure_parent(path: str | Path) -> Path:
@@ -32,8 +33,38 @@ def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=_json_default)
 
 
+def canonical_json_dumps(value: Any) -> str:
+    """以稳定排序输出 JSON，适用于哈希与指纹计算。"""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_json_default)
+
+
+def build_dataset_version_fingerprint(
+    *,
+    dataset_digest: str,
+    data_source: str,
+    data_start_date: str | None,
+    data_end_date: str | None,
+    scope: Any,
+    import_run_ids: list[str],
+    degradation_flags: list[str],
+    warnings: list[str],
+) -> str:
+    """基于数据快照与 provenance 语义生成稳定指纹。"""
+    payload = {
+        "dataset_digest": dataset_digest,
+        "data_source": data_source,
+        "data_start_date": data_start_date,
+        "data_end_date": data_end_date,
+        "scope": scope,
+        "import_run_ids": import_run_ids,
+        "degradation_flags": degradation_flags,
+        "warnings": warnings,
+    }
+    return hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
 def _json_default(value: Any) -> Any:
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
@@ -52,7 +83,7 @@ def parse_yyyymmdd(value: str | None) -> date | None:
     if value is None:
         return None
     text = str(value).strip()
-    if not text or text.lower() == "nan" or text.lower() == "none":
+    if not text or text.lower() in {"nan", "none"}:
         return None
     if len(text) == 8 and text.isdigit():
         return datetime.strptime(text, "%Y%m%d").date()

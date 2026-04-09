@@ -161,6 +161,7 @@ class MockBroker(BrokerBase):
             fee=fee,
             tax=tax,
             run_id=order.run_id,
+            broker_order_id=order.order_id,
         )
         self._fills.append(fill)
         return fill

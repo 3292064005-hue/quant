@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    {
+      "task_name": "momentum_lb3_top2",
+      "feature_name": "momentum",
+      "lookback": 3,
+      "top_n": 2
+    },
+    {
+      "task_name": "momentum_lb5_top3",
+      "feature_name": "momentum",
+      "lookback": 5,
+      "top_n": 3
+    }
+  ]
+}
