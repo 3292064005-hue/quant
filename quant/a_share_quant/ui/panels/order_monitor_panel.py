@@ -7,9 +7,10 @@ from a_share_quant.ui.panels.common import build_key_value_group, build_page, bu
 
 
 def build_order_monitor_panel(operations_snapshot: dict[str, Any]) -> object:
-    """展示回测执行与 operator 会话摘要。"""
-    latest_execution = operations_snapshot.get("latest_execution_summary", {})
-    latest_operator = operations_snapshot.get("latest_operator_session") or {}
+    """展示回测执行、operator 会话与可观测性摘要。"""
+    latest_execution = operations_snapshot.get("ui_latest_execution_summary") or {}
+    latest_operator = operations_snapshot.get("ui_latest_operator_session") or {}
+    observability = latest_operator.get("observability") or {}
     return build_page(
         "订单、成交与执行摘要",
         [
@@ -26,28 +27,12 @@ def build_order_monitor_panel(operations_snapshot: dict[str, Any]) -> object:
             build_table_group(
                 "最近回测订单",
                 latest_execution.get("recent_orders", []),
-                [
-                    ("订单ID", "order_id"),
-                    ("日期", "trade_date"),
-                    ("标的", "ts_code"),
-                    ("方向", "side"),
-                    ("价格", "price"),
-                    ("数量", "quantity"),
-                    ("状态", "status"),
-                ],
+                [("订单ID", "order_id"), ("日期", "trade_date"), ("标的", "ts_code"), ("方向", "side"), ("价格", "price"), ("数量", "quantity"), ("状态", "status")],
             ),
             build_table_group(
                 "最近回测成交",
                 latest_execution.get("recent_fills", []),
-                [
-                    ("成交ID", "fill_id"),
-                    ("订单ID", "order_id"),
-                    ("日期", "trade_date"),
-                    ("标的", "ts_code"),
-                    ("方向", "side"),
-                    ("成交价", "fill_price"),
-                    ("数量", "fill_quantity"),
-                ],
+                [("成交ID", "fill_id"), ("订单ID", "order_id"), ("日期", "trade_date"), ("标的", "ts_code"), ("方向", "side"), ("成交价", "fill_price"), ("数量", "fill_quantity")],
             ),
             build_key_value_group(
                 "最近 Operator 会话",
@@ -70,30 +55,28 @@ def build_order_monitor_panel(operations_snapshot: dict[str, Any]) -> object:
                     "last_supervised_at": latest_operator.get("last_supervised_at"),
                 },
             ),
+            build_key_value_group(
+                "Operator 可观测性",
+                {
+                    "total_event_count": observability.get("total_event_count"),
+                    "degraded_event_count": observability.get("degraded_event_count"),
+                    "audit_write_failure_count": observability.get("audit_write_failure_count"),
+                    "recovery_retry_failure_count": observability.get("recovery_retry_failure_count"),
+                    "supervisor_event_count": observability.get("supervisor_event_count"),
+                    "reconcile_event_count": observability.get("reconcile_event_count"),
+                    "event_type_counts": observability.get("event_type_counts"),
+                    "level_counts": observability.get("level_counts"),
+                },
+            ),
             build_table_group(
                 "Operator 订单",
                 latest_operator.get("recent_orders", []),
-                [
-                    ("订单ID", "order_id"),
-                    ("标的", "ts_code"),
-                    ("方向", "side"),
-                    ("价格", "price"),
-                    ("数量", "quantity"),
-                    ("状态", "status"),
-                    ("Broker单号", "broker_order_id"),
-                ],
+                [("订单ID", "order_id"), ("标的", "ts_code"), ("方向", "side"), ("价格", "price"), ("数量", "quantity"), ("状态", "status"), ("Broker单号", "broker_order_id")],
             ),
             build_table_group(
                 "Operator 成交",
                 latest_operator.get("recent_fills", []),
-                [
-                    ("成交ID", "fill_id"),
-                    ("订单ID", "order_id"),
-                    ("标的", "ts_code"),
-                    ("方向", "side"),
-                    ("成交价", "fill_price"),
-                    ("数量", "fill_quantity"),
-                ],
+                [("成交ID", "fill_id"), ("订单ID", "order_id"), ("标的", "ts_code"), ("方向", "side"), ("成交价", "fill_price"), ("数量", "fill_quantity")],
             ),
         ],
     )

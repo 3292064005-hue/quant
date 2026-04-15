@@ -45,8 +45,10 @@ def test_research_workflow_exposes_feature_signal_and_experiment_summary(tmp_pat
     assert len(signal["selected_symbols"]) <= 2
     assert experiment["experiment"]["feature_name"] == "momentum"
     assert experiment["signal"]["selected_count"] == len(signal["selected_symbols"])
-    assert feature["research_run_id"].startswith("research_")
-    assert signal["research_run_id"].startswith("research_")
+    assert feature["research_run_id"] is None
+    assert signal["research_run_id"] is None
+    assert feature["recorded"] is False
+    assert signal["recorded"] is False
     assert experiment["research_run_id"].startswith("research_")
     assert experiment["research_session_id"].startswith("research_session_")
     assert any(item["research_run_id"] == experiment["research_run_id"] for item in recent)
@@ -116,6 +118,8 @@ def test_research_workflow_dataset_snapshot_uses_persistent_cache(tmp_path: Path
         )
     assert first["cache_meta"]["cache_hit"] is False
     assert second["cache_meta"]["cache_hit"] is True
+    assert first["research_run_id"] is None
+    assert second["research_run_id"] is None
     assert len(cache_rows) == 1
     assert cache_rows[0]["artifact_type"] == "dataset_summary"
     assert cache_rows[0]["hit_count"] >= 1
@@ -133,6 +137,20 @@ def test_research_workflow_feature_snapshot_uses_persistent_cache(tmp_path: Path
         )
     assert first["cache_meta"]["cache_hit"] is False
     assert second["cache_meta"]["cache_hit"] is True
+    assert first["research_run_id"] is None
+    assert second["research_run_id"] is None
     assert len(cache_rows) == 1
     assert cache_rows[0]["artifact_type"] == "feature_snapshot"
     assert cache_rows[0]["hit_count"] >= 1
+
+
+def test_research_workflow_query_snapshots_require_explicit_record_flag(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    with bootstrap_data_context(str(config_path)) as context:
+        context.require_data_service().import_csv("sample_data/daily_bars.csv")
+        workflow = context.require_workflow_registry().get("workflow.research")
+        signal = workflow.run_signal_snapshot(feature_name="momentum", lookback=3, top_n=2, record=True)
+        recent = workflow.list_recent_runs(limit=5)
+    assert signal["research_run_id"].startswith("research_")
+    assert signal["recorded"] is True
+    assert any(item["research_run_id"] == signal["research_run_id"] for item in recent)

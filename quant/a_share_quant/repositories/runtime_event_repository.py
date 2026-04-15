@@ -76,7 +76,7 @@ class RuntimeEventRepository:
         stream_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        sql = "SELECT event_id, source_domain, stream_scope, stream_id, event_type, level, payload_json, occurred_at FROM runtime_events"
+        sql = "SELECT rowid AS storage_offset, event_id, source_domain, stream_scope, stream_id, event_type, level, payload_json, occurred_at FROM runtime_events"
         clauses: list[str] = []
         params: list[Any] = []
         if source_domain is not None:
@@ -90,7 +90,7 @@ class RuntimeEventRepository:
             params.append(stream_id)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY occurred_at DESC LIMIT ?"
+        sql += " ORDER BY occurred_at DESC, storage_offset DESC LIMIT ?"
         params.append(limit)
         rows = self.store.query(sql, tuple(params))
         normalized: list[dict[str, Any]] = []
@@ -98,6 +98,7 @@ class RuntimeEventRepository:
             payload = json.loads(row["payload_json"] or "{}")
             normalized.append(
                 {
+                    "storage_offset": int(row["storage_offset"]),
                     "event_id": row["event_id"],
                     "source_domain": row["source_domain"],
                     "stream_scope": row["stream_scope"],
@@ -108,4 +109,38 @@ class RuntimeEventRepository:
                     "occurred_at": row["occurred_at"],
                 }
             )
+        return normalized
+
+
+    def list_stream_events(
+        self,
+        *,
+        source_domain: str | None = None,
+        stream_scope: str | None = None,
+        stream_id: str | None = None,
+        limit: int = 200,
+        newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        """按统一 stream 主键读取事件流。"""
+        sql = "SELECT rowid AS storage_offset, event_id, source_domain, stream_scope, stream_id, event_type, level, payload_json, occurred_at FROM runtime_events"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if source_domain is not None:
+            clauses.append("source_domain = ?")
+            params.append(source_domain)
+        if stream_scope is not None:
+            clauses.append("stream_scope = ?")
+            params.append(stream_scope)
+        if stream_id is not None:
+            clauses.append("stream_id = ?")
+            params.append(stream_id)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY occurred_at {0}, storage_offset {0} LIMIT ?".format("DESC" if newest_first else "ASC")
+        params.append(limit)
+        rows = self.store.query(sql, tuple(params))
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"] or "{}")
+            normalized.append({"storage_offset": int(row["storage_offset"]), "event_id": row["event_id"], "source_domain": row["source_domain"], "stream_scope": row["stream_scope"], "stream_id": row["stream_id"], "event_type": row["event_type"], "level": row["level"], "payload": payload, "occurred_at": row["occurred_at"]})
         return normalized

@@ -1,0 +1,15 @@
+{
+  "provider": "qmt",
+  "readiness_level": "staging_accepted",
+  "verified_at": "2026-04-10T00:00:00+00:00",
+  "expires_at": "2027-04-10T00:00:00+00:00",
+  "suite_name": "builtin.operator_demo_acceptance",
+  "environment": "demo-sandbox",
+  "runtime_modes": ["paper_trade", "live_trade"],
+  "scenario_checks": ["submit", "sync", "reconcile", "restart_recovery"],
+  "capabilities": {
+    "event_source_mode": "auto",
+    "supports_multi_account": true,
+    "supports_reconcile": true
+  }
+}

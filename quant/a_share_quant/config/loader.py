@@ -53,7 +53,8 @@ class ConfigLoader:
 
         Boundary Behavior:
             - 绝对路径只接受真实存在的文件，不做隐式映射。
-            - 相对路径若在当前工作目录不存在，会尝试映射到 ``a_share_quant.resources/configs``。
+            - 相对路径若在当前工作目录不存在，源码态优先回退到仓库 ``configs/`` 单一真相源。
+            - 若仓库配置不可用，则回退到安装态 ``a_share_quant.resources/configs``。
             - 支持 ``configs/*.yaml`` 与同目录 companion/broker 配置的安装态加载。
         """
         candidate = Path(path)
@@ -62,10 +63,16 @@ class ConfigLoader:
         if candidate.is_absolute():
             raise ConfigLoaderError(f"配置文件不存在: {candidate}")
 
-        resource_root = Path(str(resources.files("a_share_quant.resources").joinpath("configs")))
         candidate_parts = list(candidate.parts)
         if candidate_parts[:1] == ["configs"]:
             candidate_parts = candidate_parts[1:]
+
+        repo_config_root = Path(__file__).resolve().parents[2] / "configs"
+        repo_candidate = repo_config_root.joinpath(*candidate_parts) if candidate_parts else repo_config_root
+        if repo_candidate.exists():
+            return repo_candidate.resolve()
+
+        resource_root = Path(str(resources.files("a_share_quant.resources").joinpath("configs")))
         bundled = resource_root.joinpath(*candidate_parts) if candidate_parts else resource_root
         if bundled.exists():
             return bundled.resolve()

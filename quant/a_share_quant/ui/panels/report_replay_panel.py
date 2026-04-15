@@ -8,9 +8,9 @@ from a_share_quant.ui.panels.common import build_key_value_group, build_page, bu
 
 def build_report_replay_panel(operations_snapshot: dict[str, Any]) -> object:
     """展示报告、回放、谱系与插件摘要。"""
-    summary = operations_snapshot.get("latest_report_replay_summary") or {}
-    research_rows = operations_snapshot.get("ui_recent_research_runs") or operations_snapshot.get("recent_research_run_summaries", [])
-    provider_rows = operations_snapshot.get("ui_available_provider_details") or operations_snapshot.get("available_provider_details", [])
+    summary = operations_snapshot.get("ui_latest_report_replay_summary") or {}
+    research_rows = operations_snapshot.get("ui_recent_research_runs") or []
+    provider_rows = operations_snapshot.get("ui_available_provider_details") or []
     related_research_rows = summary.get("related_research_run_summaries") or []
     return build_page(
         "报告、回放与谱系摘要",
@@ -50,9 +50,9 @@ def build_report_replay_panel(operations_snapshot: dict[str, Any]) -> object:
             ),
             build_table_group(
                 "插件生命周期事件",
-                operations_snapshot.get("plugin_lifecycle_events", []),
+                operations_snapshot.get("ui_plugin_lifecycle_events", []),
                 [
-                    ("事件", "event"),
+                    ("事件", "event_type"),
                     ("插件", "plugin_name"),
                     ("工作流", "workflow_name"),
                     ("时间", "created_at"),

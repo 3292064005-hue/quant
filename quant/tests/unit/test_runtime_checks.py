@@ -4,13 +4,20 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, cast
 
+import pytest
 import yaml
 
 from a_share_quant.adapters.broker.ptrade_adapter import PTradeAdapter
 from a_share_quant.adapters.broker.qmt_adapter import QMTAdapter
 from a_share_quant.cli import _build_runtime_results, main_check_runtime
+from a_share_quant.core import runtime_checks
 from a_share_quant.core.broker_client_loader import load_broker_client
-from a_share_quant.core.runtime_checks import check_broker_runtime, check_data_provider_runtime, check_ui_runtime, summarize_runtime_results
+from a_share_quant.core.runtime_checks import (
+    check_broker_runtime,
+    check_data_provider_runtime,
+    check_ui_runtime,
+    summarize_runtime_results,
+)
 
 
 class _HeartbeatClient(Protocol):
@@ -49,10 +56,27 @@ class _BadSignatureBrokerClient(_BrokerClient):
         return None
 
 
-def test_check_ui_runtime_reports_missing_dependency() -> None:
+def test_check_ui_runtime_reports_missing_dependency(monkeypatch) -> None:
+    original_find_spec = runtime_checks.find_spec
+    monkeypatch.setattr(
+        runtime_checks,
+        "find_spec",
+        lambda module_name: None if module_name == "PySide6" else original_find_spec(module_name),
+    )
+
     result = check_ui_runtime()
     assert result.ok is False
     assert "PySide6" in result.message
+
+
+def test_check_ui_runtime_reports_installed_pyside6() -> None:
+    pytest.importorskip("PySide6")
+
+    result = check_ui_runtime()
+
+    assert result.ok is True
+    assert result.details["module"] == "PySide6"
+    assert result.capability.operable_ok is True
 
 
 def test_check_data_provider_runtime_requires_tushare_dependency_or_token() -> None:
@@ -116,6 +140,12 @@ def test_check_runtime_script_reports_configured_ui_and_provider_state(temp_conf
     payload = yaml.safe_load(data_config_path.read_text(encoding="utf-8"))
     payload.setdefault("data", {})["provider"] = "akshare"
     data_config_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    original_find_spec = runtime_checks.find_spec
+    monkeypatch.setattr(
+        runtime_checks,
+        "find_spec",
+        lambda module_name: None if module_name == "PySide6" else original_find_spec(module_name),
+    )
 
     monkeypatch.chdir(temp_config_dir)
     script_path = Path(__file__).resolve().parents[2] / "scripts" / "check_runtime.py"

@@ -8,9 +8,9 @@ from a_share_quant.ui.panels.common import build_key_value_group, build_page, bu
 
 def build_strategy_lifecycle_panel(operations_snapshot: dict[str, Any]) -> object:
     """展示工作流、策略与最近运行状态。"""
-    latest_run = operations_snapshot.get("latest_backtest_run") or {}
-    workflow_rows = operations_snapshot.get("ui_available_workflow_details") or operations_snapshot.get("available_workflow_details", [])
-    recent_research_rows = operations_snapshot.get("ui_recent_research_runs") or operations_snapshot.get("recent_research_run_summaries", [])
+    latest_run = operations_snapshot.get("ui_latest_backtest_run") or {}
+    workflow_rows = operations_snapshot.get("ui_available_workflow_details") or []
+    recent_research_rows = operations_snapshot.get("ui_recent_research_runs") or []
     return build_page(
         "策略生命周期",
         [

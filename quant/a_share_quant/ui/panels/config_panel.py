@@ -18,8 +18,13 @@ def build_config_panel(config: AppConfig) -> object:
                     "timezone": config.app.timezone,
                     "logs_dir": config.app.logs_dir,
                     "runtime_mode": config.app.runtime_mode,
+                    "distribution_profile": config.app.distribution_profile,
                     "path_resolution_mode": config.app.path_resolution_mode,
                 },
+            ),
+            build_key_value_group(
+                "Profile 能力",
+                config.distribution_capabilities(),
             ),
             build_key_value_group(
                 "数据",
@@ -34,6 +39,7 @@ def build_config_panel(config: AppConfig) -> object:
                 },
             ),
             build_key_value_group("数据库", {"path": config.database.path}),
+            build_key_value_group("Research", {"enable_cache": config.research.enable_cache, "cache_namespace": config.research.cache_namespace, "cache_schema_version": config.research.cache_schema_version, "max_cached_entries": config.research.max_cached_entries, "record_query_runs": config.research.record_query_runs}),
             build_key_value_group(
                 "回测",
                 {

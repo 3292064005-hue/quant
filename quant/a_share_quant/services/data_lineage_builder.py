@@ -28,6 +28,23 @@ class DataLineageBuilder:
         self.data_import_repository = data_import_repository
         self.dataset_version_repository = dataset_version_repository
 
+    @staticmethod
+    def _new_digest() -> "hashlib._Hash":
+        return hashlib.sha256()
+
+    def _seed_digest_with_reference_sections(self, *, digest, securities: dict[str, Security], trade_calendar: list[TradingCalendarEntry]) -> None:
+        update_digest(digest, {"section": "securities"})
+        for security in sorted(securities.values(), key=lambda item: item.ts_code):
+            update_digest(digest, {"ts_code": security.ts_code, "exchange": security.exchange, "board": security.board, "status": security.status, "list_date": security.list_date.isoformat() if security.list_date else None, "delist_date": security.delist_date.isoformat() if security.delist_date else None})
+        update_digest(digest, {"section": "trade_calendar"})
+        for item in trade_calendar:
+            update_digest(digest, {"exchange": item.exchange, "cal_date": item.cal_date.isoformat(), "is_open": item.is_open, "pretrade_date": item.pretrade_date.isoformat() if item.pretrade_date else None})
+        update_digest(digest, {"section": "bars"})
+
+    @staticmethod
+    def _update_bar_digest(*, digest, bar: Bar) -> None:
+        update_digest(digest, {"ts_code": bar.ts_code, "trade_date": bar.trade_date.isoformat(), "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close, "volume": bar.volume, "amount": bar.amount, "adj_type": bar.adj_type})
+
     def build_data_lineage(
         self,
         *,
@@ -42,44 +59,12 @@ class DataLineageBuilder:
         all_dates = sorted({bar.trade_date for bars in bars_by_symbol.values() for bar in bars})
         data_start_date = explicit_start_date or (all_dates[0] if all_dates else None)
         data_end_date = explicit_end_date or (all_dates[-1] if all_dates else None)
-        digest_payload = {
-            "bars": [
-                {
-                    "ts_code": bar.ts_code,
-                    "trade_date": bar.trade_date.isoformat(),
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": bar.volume,
-                    "amount": bar.amount,
-                    "adj_type": bar.adj_type,
-                }
-                for ts_code in sorted(bars_by_symbol)
-                for bar in bars_by_symbol[ts_code]
-            ],
-            "securities": [
-                {
-                    "ts_code": sec.ts_code,
-                    "exchange": sec.exchange,
-                    "board": sec.board,
-                    "status": sec.status,
-                    "list_date": sec.list_date.isoformat() if sec.list_date else None,
-                    "delist_date": sec.delist_date.isoformat() if sec.delist_date else None,
-                }
-                for sec in sorted(securities.values(), key=lambda item: item.ts_code)
-            ],
-            "trade_calendar": [
-                {
-                    "exchange": item.exchange,
-                    "cal_date": item.cal_date.isoformat(),
-                    "is_open": item.is_open,
-                    "pretrade_date": item.pretrade_date.isoformat() if item.pretrade_date else None,
-                }
-                for item in trade_calendar
-            ],
-        }
-        dataset_digest = hashlib.sha256(json.dumps(digest_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        digest = self._new_digest()
+        self._seed_digest_with_reference_sections(digest=digest, securities=securities, trade_calendar=trade_calendar)
+        for ts_code in sorted(bars_by_symbol):
+            for bar in bars_by_symbol[ts_code]:
+                self._update_bar_digest(digest=digest, bar=bar)
+        dataset_digest = digest.hexdigest()
         return self._finalize_data_lineage(
             dataset_digest=dataset_digest,
             data_start_date=data_start_date,
@@ -106,32 +91,8 @@ class DataLineageBuilder:
         data_start_date = explicit_start_date or (trade_dates[0] if trade_dates else None)
         data_end_date = explicit_end_date or (trade_dates[-1] if trade_dates else None)
         calendar = self.market_repository.load_calendar(exchanges=exchange_scope, start_date=data_start_date, end_date=data_end_date)
-        digest = hashlib.sha256()
-        update_digest(digest, {"section": "securities"})
-        for security in sorted(securities.values(), key=lambda item: item.ts_code):
-            update_digest(
-                digest,
-                {
-                    "ts_code": security.ts_code,
-                    "exchange": security.exchange,
-                    "board": security.board,
-                    "status": security.status,
-                    "list_date": security.list_date.isoformat() if security.list_date else None,
-                    "delist_date": security.delist_date.isoformat() if security.delist_date else None,
-                },
-            )
-        update_digest(digest, {"section": "trade_calendar"})
-        for item in calendar:
-            update_digest(
-                digest,
-                {
-                    "exchange": item.exchange,
-                    "cal_date": item.cal_date.isoformat(),
-                    "is_open": item.is_open,
-                    "pretrade_date": item.pretrade_date.isoformat() if item.pretrade_date else None,
-                },
-            )
-        update_digest(digest, {"section": "bars"})
+        digest = self._new_digest()
+        self._seed_digest_with_reference_sections(digest=digest, securities=securities, trade_calendar=calendar)
         bar_symbols: set[str] = set()
         bar_count = 0
         stream_iter = self.market_repository.iter_day_bars(trade_dates, ts_codes=requested_ts_codes)
@@ -140,20 +101,7 @@ class DataLineageBuilder:
                 bar = day_bars[ts_code]
                 bar_symbols.add(ts_code)
                 bar_count += 1
-                update_digest(
-                    digest,
-                    {
-                        "ts_code": bar.ts_code,
-                        "trade_date": trade_date.isoformat(),
-                        "open": bar.open,
-                        "high": bar.high,
-                        "low": bar.low,
-                        "close": bar.close,
-                        "volume": bar.volume,
-                        "amount": bar.amount,
-                        "adj_type": bar.adj_type,
-                    },
-                )
+                self._update_bar_digest(digest=digest, bar=bar)
         dataset_digest = digest.hexdigest()
         return self._finalize_data_lineage(
             dataset_digest=dataset_digest,
@@ -191,32 +139,8 @@ class DataLineageBuilder:
         requested_ts_codes: list[str] | None,
     ) -> tuple[StreamLineageTracker, DataLineage]:
         calendar = self.market_repository.load_calendar(exchanges=exchange_scope, start_date=data_start_date, end_date=data_end_date)
-        digest = hashlib.sha256()
-        update_digest(digest, {"section": "securities"})
-        for security in sorted(securities.values(), key=lambda item: item.ts_code):
-            update_digest(
-                digest,
-                {
-                    "ts_code": security.ts_code,
-                    "exchange": security.exchange,
-                    "board": security.board,
-                    "status": security.status,
-                    "list_date": security.list_date.isoformat() if security.list_date else None,
-                    "delist_date": security.delist_date.isoformat() if security.delist_date else None,
-                },
-            )
-        update_digest(digest, {"section": "trade_calendar"})
-        for item in calendar:
-            update_digest(
-                digest,
-                {
-                    "exchange": item.exchange,
-                    "cal_date": item.cal_date.isoformat(),
-                    "is_open": item.is_open,
-                    "pretrade_date": item.pretrade_date.isoformat() if item.pretrade_date else None,
-                },
-            )
-        update_digest(digest, {"section": "bars"})
+        digest = self._new_digest()
+        self._seed_digest_with_reference_sections(digest=digest, securities=securities, trade_calendar=calendar)
         tracker = StreamLineageTracker(
             base_digest=digest,
             day_batches=self.market_repository.iter_day_bars(trade_dates, ts_codes=requested_ts_codes),

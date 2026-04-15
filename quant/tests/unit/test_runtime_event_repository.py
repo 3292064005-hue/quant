@@ -51,3 +51,13 @@ def test_event_bus_journal_can_sink_to_runtime_event_stream(tmp_path: Path) -> N
     events = repo.list_recent(source_domain="backtest", stream_scope="run_event")
     assert events[0]["stream_id"] == "run-1"
     assert events[0]["event_type"] == EventType.DAY_CLOSED
+
+
+def test_runtime_event_stream_orders_same_timestamp_by_storage_offset(tmp_path: Path) -> None:
+    store = _build_store(tmp_path)
+    repo = RuntimeEventRepository(store)
+    repo.append(source_domain="operator", stream_scope="trade_session", stream_id="session-1", event_type="ORDER_SUBMITTED", payload={"sequence": 1}, occurred_at="2026-01-05T09:30:00+00:00", event_id="evt-1")
+    repo.append(source_domain="operator", stream_scope="trade_session", stream_id="session-1", event_type="ORDER_ACCEPTED", payload={"sequence": 2}, occurred_at="2026-01-05T09:30:00+00:00", event_id="evt-2")
+    rows = repo.list_stream_events(source_domain="operator", stream_scope="trade_session", stream_id="session-1", newest_first=False)
+    assert [row["event_id"] for row in rows] == ["evt-1", "evt-2"]
+    assert rows[0]["storage_offset"] < rows[1]["storage_offset"]

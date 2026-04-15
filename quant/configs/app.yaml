@@ -5,6 +5,7 @@ app:
   logs_dir: ../runtime/logs
   path_resolution_mode: config_dir
   runtime_mode: research_backtest
+  distribution_profile: workstation
 data:
   storage_dir: ../runtime/data
   reports_dir: ../runtime/reports
@@ -64,7 +65,6 @@ plugins:
   enabled_builtin: []
   disabled: []
   external: []
-
 operator:
   require_approval: false
   max_batch_orders: 20
@@ -75,10 +75,10 @@ operator:
   supervisor_heartbeat_interval_seconds: 5.0
   supervisor_idle_timeout_seconds: 2.0
   supervisor_max_sessions_per_pass: 10
-
 research:
   enable_cache: true
   cache_namespace: default
   cache_schema_version: v3
   dataset_scope_cache_invalidation: true
   max_cached_entries: 500
+  record_query_runs: false

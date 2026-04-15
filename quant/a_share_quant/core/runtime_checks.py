@@ -9,6 +9,17 @@ from importlib.util import find_spec
 from typing import Any
 
 from a_share_quant.adapters.broker.mappers import map_account_snapshot, map_fill, map_position_snapshots
+from a_share_quant.core.broker_acceptance import (
+    BrokerAcceptanceError,
+    BrokerAcceptanceEvidence,
+    BrokerReadinessLevel,
+    compute_broker_readiness_level,
+    derive_required_readiness_level,
+    is_readiness_sufficient,
+    load_acceptance_evidence,
+    readiness_level_name,
+    summarize_acceptance_evidence,
+)
 from a_share_quant.domain.models import AccountSnapshot, Fill, OrderRequest, OrderSide, PositionSnapshot
 
 
@@ -20,6 +31,9 @@ class RuntimeCapabilityState:
     boundary_ok: bool = False
     client_contract_ok: bool = False
     operable_ok: bool = False
+    acceptance_ok: bool = False
+    recovery_ok: bool = False
+    readiness_level: str = "config_validated"
 
 
 @dataclass(slots=True)
@@ -46,6 +60,9 @@ def _build_result(
     boundary_ok: bool = False,
     client_contract_ok: bool = False,
     operable_ok: bool = False,
+    acceptance_ok: bool = False,
+    recovery_ok: bool = False,
+    readiness_level: str = "config_validated",
 ) -> RuntimeCheckResult:
     return RuntimeCheckResult(
         name=name,
@@ -57,6 +74,9 @@ def _build_result(
             boundary_ok=boundary_ok,
             client_contract_ok=client_contract_ok,
             operable_ok=operable_ok,
+            acceptance_ok=acceptance_ok,
+            recovery_ok=recovery_ok,
+            readiness_level=readiness_level,
         ),
     )
 
@@ -79,6 +99,9 @@ def _check_python_module(module_name: str, install_hint: str, *, name: str | Non
         boundary_ok=True,
         client_contract_ok=True,
         operable_ok=True,
+        acceptance_ok=True,
+        recovery_ok=True,
+        readiness_level="operable",
     )
 
 
@@ -378,6 +401,224 @@ def _validate_broker_sample_payloads(
     return None
 
 
+def _load_broker_acceptance_evidence(
+    *,
+    acceptance_manifest_path: str | None,
+    provider: str,
+    runtime_mode: str | None,
+    execute_acceptance_suite: bool = False,
+    config_path: str | None = None,
+    broker_client_factory: str | None = None,
+) -> tuple[BrokerAcceptanceEvidence | None, str | None]:
+    if execute_acceptance_suite:
+        if not config_path:
+            return None, "execute_acceptance_suite=true 但缺少 config_path"
+        try:
+            from a_share_quant.core.broker_acceptance_suite import run_operator_acceptance_suite
+
+            suite_result = run_operator_acceptance_suite(
+                config_path=config_path,
+                broker_client_factory=broker_client_factory,
+                provider=provider,
+                runtime_mode=runtime_mode or "paper_trade",
+                manifest_path=acceptance_manifest_path,
+            )
+            evidence = suite_result.to_evidence()
+            if not suite_result.ok:
+                failed = next((item for item in suite_result.scenarios if not item.ok), None)
+                return evidence, f"broker acceptance suite 失败: {failed.name if failed else 'unknown'}: {failed.message if failed else 'unknown'}"
+            return evidence, None
+        except Exception as exc:
+            return None, f"broker acceptance suite 执行失败: {exc}"
+    if not acceptance_manifest_path:
+        return None, None
+    try:
+        evidence = load_acceptance_evidence(
+            acceptance_manifest_path,
+            provider=provider,
+            runtime_mode=runtime_mode,
+        )
+    except BrokerAcceptanceError as exc:
+        return None, str(exc)
+    return evidence, None
+
+
+def _decorate_broker_result(
+    base_result: RuntimeCheckResult,
+    *,
+    provider: str,
+    runtime_mode: str | None,
+    distribution_profile: str | None,
+    required_readiness_level: str | None,
+    acceptance_manifest_path: str | None,
+    execute_acceptance_suite: bool = False,
+    config_path: str | None = None,
+    broker_client_factory: str | None = None,
+) -> RuntimeCheckResult:
+    evidence, acceptance_error = _load_broker_acceptance_evidence(
+        acceptance_manifest_path=acceptance_manifest_path,
+        provider=provider,
+        runtime_mode=runtime_mode,
+        execute_acceptance_suite=execute_acceptance_suite,
+        config_path=config_path,
+        broker_client_factory=broker_client_factory,
+    )
+    required_level = derive_required_readiness_level(
+        runtime_mode=runtime_mode,
+        distribution_profile=distribution_profile,
+        explicit_requirement=required_readiness_level,
+    )
+    current_level = compute_broker_readiness_level(
+        config_ok=base_result.capability.config_ok,
+        boundary_ok=base_result.capability.boundary_ok,
+        client_contract_ok=base_result.capability.client_contract_ok,
+        operable_ok=base_result.capability.operable_ok,
+        evidence=evidence,
+    )
+    requirement_ok = is_readiness_sufficient(current_level, required_level)
+    acceptance_ok = evidence is not None and is_readiness_sufficient(evidence.readiness_level, required_level)
+    recovery_ok = evidence.has_recovery_coverage() if evidence is not None else (provider == "mock" and base_result.capability.operable_ok)
+    details = dict(base_result.details)
+    details.update(
+        {
+            "provider": provider,
+            "runtime_mode": runtime_mode,
+            "distribution_profile": distribution_profile,
+            "acceptance_manifest_path": acceptance_manifest_path,
+            "execute_acceptance_suite": execute_acceptance_suite,
+            "acceptance_evidence": summarize_acceptance_evidence(evidence),
+            "acceptance_error": acceptance_error,
+            "required_readiness_level": readiness_level_name(required_level),
+            "current_readiness_level": readiness_level_name(current_level),
+        }
+    )
+    message = base_result.message
+    ok = bool(base_result.ok)
+    if acceptance_error and required_level >= BrokerReadinessLevel.STAGING_ACCEPTED:
+        ok = False
+        message = f"{message}；broker acceptance 证据无效: {acceptance_error}"
+    if ok and not requirement_ok:
+        ok = False
+        message = (
+            f"{message}；当前 broker readiness={readiness_level_name(current_level)}，"
+            f"不满足要求 {readiness_level_name(required_level)}"
+        )
+    return RuntimeCheckResult(
+        name=base_result.name,
+        ok=ok,
+        message=message,
+        details=details,
+        capability=RuntimeCapabilityState(
+            config_ok=base_result.capability.config_ok,
+            boundary_ok=base_result.capability.boundary_ok,
+            client_contract_ok=base_result.capability.client_contract_ok,
+            operable_ok=base_result.capability.operable_ok,
+            acceptance_ok=acceptance_ok,
+            recovery_ok=recovery_ok,
+            readiness_level=readiness_level_name(current_level),
+        ),
+    )
+
+
+def check_market_storage_runtime(
+    data_config: Any,
+    market_repository: Any,
+    data_import_repository: Any | None = None,
+    dataset_version_repository: Any | None = None,
+    dataset_version_id: str | None = None,
+) -> RuntimeCheckResult:
+    """检查交易日历与数据质量事件是否满足当前运行策略。"""
+    try:
+        calendar = market_repository.load_calendar(exchanges=[getattr(data_config, "default_exchange", "SSE")])
+    except TypeError:
+        calendar = market_repository.load_calendar(exchange=getattr(data_config, "default_exchange", "SSE"))
+
+    latest_import = data_import_repository.get_latest_run() if data_import_repository is not None else None
+    target_dataset = dataset_version_repository.get_by_id(dataset_version_id) if (dataset_version_repository is not None and dataset_version_id) else None
+
+    degradation_flags: list[str] = []
+    warnings: list[str] = []
+    import_run_ids: list[str] = []
+    scope_source = "latest_import"
+
+    if target_dataset is not None:
+        try:
+            import json as _json
+            degradation_flags = list(_json.loads(target_dataset.degradation_flags_json or "[]"))
+            warnings = list(_json.loads(target_dataset.warnings_json or "[]"))
+            import_run_ids = list(_json.loads(target_dataset.import_run_ids_json or "[]"))
+        except Exception:
+            degradation_flags = []
+            warnings = []
+            import_run_ids = []
+        scope_source = "dataset_version"
+    elif latest_import is not None:
+        try:
+            import json as _json
+            degradation_flags = list(_json.loads(latest_import.degradation_flags_json or "[]"))
+            warnings = list(_json.loads(latest_import.warnings_json or "[]"))
+            import_run_ids = [latest_import.import_run_id]
+        except Exception:
+            degradation_flags = []
+            warnings = []
+            import_run_ids = []
+
+    policy = str(getattr(data_config, "calendar_policy", "demo")).strip().lower()
+    strict_quality = bool(getattr(data_config, "fail_on_degraded_data", False) or not bool(getattr(data_config, "allow_degraded_data", True)))
+    details = {
+        "calendar_policy": policy,
+        "calendar_present": bool(calendar),
+        "quality_scope": scope_source,
+        "dataset_version_id": dataset_version_id,
+        "latest_import_run_id": getattr(latest_import, "import_run_id", None),
+        "scoped_import_run_ids": import_run_ids,
+        "degradation_flags": degradation_flags,
+        "warnings": warnings,
+    }
+    if policy == "strict" and not calendar:
+        return _build_result(
+            name="market_data",
+            ok=False,
+            message="data.calendar_policy=strict 但数据库中不存在正式 trading_calendar，禁止继续进入正式运行",
+            details=details,
+            config_ok=True,
+            boundary_ok=False,
+        )
+    if policy == "strict" and "calendar_inferred_from_bars" in degradation_flags:
+        return _build_result(
+            name="market_data",
+            ok=False,
+            message="当前运行绑定的数据集仍存在 calendar_inferred_from_bars，严格交易日历模式不接受该降级",
+            details=details,
+            config_ok=True,
+            boundary_ok=False,
+        )
+    if strict_quality and degradation_flags:
+        return _build_result(
+            name="market_data",
+            ok=False,
+            message="当前配置禁止 degraded data，但本次运行绑定的数据集仍存在降级事件",
+            details=details,
+            config_ok=True,
+            boundary_ok=True,
+            client_contract_ok=True,
+            operable_ok=False,
+        )
+    return _build_result(
+        name="market_data",
+        ok=True,
+        message="市场数据存储运行检查通过",
+        details=details,
+        config_ok=True,
+        boundary_ok=True,
+        client_contract_ok=True,
+        operable_ok=True,
+        acceptance_ok=True,
+        recovery_ok=True,
+        readiness_level="operable",
+    )
+
+
 def check_broker_runtime(
     provider: str,
     *,
@@ -388,6 +629,12 @@ def check_broker_runtime(
     allow_shallow_client_check: bool = False,
     strict_contract_mapping: bool = True,
     runtime_mode: str | None = None,
+    distribution_profile: str | None = None,
+    acceptance_manifest_path: str | None = None,
+    execute_acceptance_suite: bool = False,
+    required_readiness_level: str | None = None,
+    config_path: str | None = None,
+    broker_client_factory: str | None = None,
 ) -> RuntimeCheckResult:
     """检查券商适配器运行前条件。
 
@@ -405,32 +652,75 @@ def check_broker_runtime(
     normalized = provider.strip().lower()
     runtime_check = _validate_runtime_mode_provider(runtime_mode, normalized)
     if runtime_check is not None:
-        return runtime_check
+        return _decorate_broker_result(
+            runtime_check,
+            provider=normalized,
+            runtime_mode=runtime_mode,
+            distribution_profile=distribution_profile,
+            required_readiness_level=required_readiness_level,
+            acceptance_manifest_path=acceptance_manifest_path,
+            execute_acceptance_suite=execute_acceptance_suite,
+            config_path=config_path,
+            broker_client_factory=broker_client_factory,
+        )
     if normalized == "mock":
-        return _build_result(
-            name="broker",
-            ok=True,
-            message="MockBroker 无需额外运行时",
-            details={"provider": normalized, "runtime_mode": runtime_mode},
-            config_ok=True,
-            boundary_ok=True,
-            client_contract_ok=True,
-            operable_ok=True,
+        return _decorate_broker_result(
+            _build_result(
+                name="broker",
+                ok=True,
+                message="MockBroker 无需额外运行时",
+                details={"provider": normalized, "runtime_mode": runtime_mode},
+                config_ok=True,
+                boundary_ok=True,
+                client_contract_ok=True,
+                operable_ok=True,
+                acceptance_ok=True,
+                recovery_ok=True,
+                readiness_level="operable",
+            ),
+            provider=normalized,
+            runtime_mode=runtime_mode,
+            distribution_profile=distribution_profile,
+            required_readiness_level=required_readiness_level,
+            acceptance_manifest_path=acceptance_manifest_path,
+            execute_acceptance_suite=execute_acceptance_suite,
+            config_path=config_path,
+            broker_client_factory=broker_client_factory,
         )
     if normalized not in {"qmt", "ptrade"}:
-        return _build_result(name="broker", ok=False, message=f"未知 broker.provider={provider}", details={"provider": provider})
+        return _decorate_broker_result(_build_result(name="broker", ok=False, message=f"未知 broker.provider={provider}", details={"provider": provider}), provider=normalized, runtime_mode=runtime_mode, distribution_profile=distribution_profile, required_readiness_level=required_readiness_level, acceptance_manifest_path=acceptance_manifest_path, execute_acceptance_suite=execute_acceptance_suite, config_path=config_path, broker_client_factory=broker_client_factory)
     if not endpoint or not account_id:
-        return _build_result(
-            name="broker",
-            ok=False,
-            message=f"{normalized.upper()} 运行时缺少 endpoint/account_id",
-            details={"provider": normalized, "runtime_mode": runtime_mode, "endpoint_present": bool(endpoint), "account_id_present": bool(account_id)},
-            config_ok=False,
+        return _decorate_broker_result(
+            _build_result(
+                name="broker",
+                ok=False,
+                message=f"{normalized.upper()} 运行时缺少 endpoint/account_id",
+                details={"provider": normalized, "runtime_mode": runtime_mode, "endpoint_present": bool(endpoint), "account_id_present": bool(account_id)},
+                config_ok=False,
+            ),
+            provider=normalized,
+            runtime_mode=runtime_mode,
+            distribution_profile=distribution_profile,
+            required_readiness_level=required_readiness_level,
+            acceptance_manifest_path=acceptance_manifest_path,
+            execute_acceptance_suite=execute_acceptance_suite,
+            config_path=config_path,
+            broker_client_factory=broker_client_factory,
         )
     if sample_payloads:
         sample_check = _validate_broker_sample_payloads(sample_payloads, strict_contract_mapping=strict_contract_mapping)
         if sample_check is not None:
-            return sample_check
+            return _decorate_broker_result(
+                sample_check,
+                provider=normalized,
+                runtime_mode=runtime_mode,
+                distribution_profile=distribution_profile,
+                required_readiness_level=required_readiness_level,
+                acceptance_manifest_path=acceptance_manifest_path,
+                execute_acceptance_suite=execute_acceptance_suite,
+                config_path=config_path,
+                broker_client_factory=broker_client_factory,
+            )
     if injected_client is None:
         if allow_shallow_client_check:
             details = {
@@ -451,37 +741,67 @@ def check_broker_runtime(
                     f"{normalized.upper()} 基础配置检查通过；"
                     f"当前为{'严格' if strict_contract_mapping else '兼容'}映射模式；未执行客户端方法契约检查"
                 )
-            return _build_result(
+            return _decorate_broker_result(
+                _build_result(
+                    name="broker",
+                    ok=True,
+                    message=message,
+                    details=details,
+                    config_ok=True,
+                    boundary_ok=True,
+                    client_contract_ok=False,
+                    operable_ok=False,
+                ),
+                provider=normalized,
+                runtime_mode=runtime_mode,
+                distribution_profile=distribution_profile,
+                required_readiness_level=required_readiness_level,
+                acceptance_manifest_path=acceptance_manifest_path,
+                execute_acceptance_suite=execute_acceptance_suite,
+                config_path=config_path,
+                broker_client_factory=broker_client_factory,
+            )
+        return _decorate_broker_result(
+            _build_result(
                 name="broker",
-                ok=True,
-                message=message,
-                details=details,
+                ok=False,
+                message=f"{normalized.upper()} 运行时缺少注入客户端；请通过 bootstrap(..., broker_clients={{'{normalized}': client}}) 提供",
+                details={"provider": normalized, "runtime_mode": runtime_mode, "client_required": True},
                 config_ok=True,
                 boundary_ok=True,
                 client_contract_ok=False,
                 operable_ok=False,
-            )
-        return _build_result(
-            name="broker",
-            ok=False,
-            message=f"{normalized.upper()} 运行时缺少注入客户端；请通过 bootstrap(..., broker_clients={{'{normalized}': client}}) 提供",
-            details={"provider": normalized, "runtime_mode": runtime_mode, "client_required": True},
-            config_ok=True,
-            boundary_ok=True,
-            client_contract_ok=False,
-            operable_ok=False,
+            ),
+            provider=normalized,
+            runtime_mode=runtime_mode,
+            distribution_profile=distribution_profile,
+            required_readiness_level=required_readiness_level,
+            acceptance_manifest_path=acceptance_manifest_path,
+            execute_acceptance_suite=execute_acceptance_suite,
+            config_path=config_path,
+            broker_client_factory=broker_client_factory,
         )
     missing = [method for method in _REQUIRED_BROKER_CLIENT_METHODS if not callable(getattr(injected_client, method, None))]
     if missing:
-        return _build_result(
-            name="broker",
-            ok=False,
-            message=f"{normalized.upper()} 客户端缺少必要方法: {missing}",
-            details={"provider": normalized, "runtime_mode": runtime_mode, "missing_methods": missing},
-            config_ok=True,
-            boundary_ok=True,
-            client_contract_ok=False,
-            operable_ok=False,
+        return _decorate_broker_result(
+            _build_result(
+                name="broker",
+                ok=False,
+                message=f"{normalized.upper()} 客户端缺少必要方法: {missing}",
+                details={"provider": normalized, "runtime_mode": runtime_mode, "missing_methods": missing},
+                config_ok=True,
+                boundary_ok=True,
+                client_contract_ok=False,
+                operable_ok=False,
+            ),
+            provider=normalized,
+            runtime_mode=runtime_mode,
+            distribution_profile=distribution_profile,
+            required_readiness_level=required_readiness_level,
+            acceptance_manifest_path=acceptance_manifest_path,
+            execute_acceptance_suite=execute_acceptance_suite,
+            config_path=config_path,
+            broker_client_factory=broker_client_factory,
         )
     incompatible = [
         method
@@ -489,51 +809,127 @@ def check_broker_runtime(
         if not _supports_positional_arity(getattr(injected_client, method), required_args)
     ]
     if incompatible:
-        return _build_result(
-            name="broker",
-            ok=False,
-            message=f"{normalized.upper()} 客户端方法签名与工程契约不兼容: {incompatible}",
-            details={"provider": normalized, "runtime_mode": runtime_mode, "incompatible_methods": incompatible},
-            config_ok=True,
-            boundary_ok=True,
-            client_contract_ok=False,
-            operable_ok=False,
+        return _decorate_broker_result(
+            _build_result(
+                name="broker",
+                ok=False,
+                message=f"{normalized.upper()} 客户端方法签名与工程契约不兼容: {incompatible}",
+                details={"provider": normalized, "runtime_mode": runtime_mode, "incompatible_methods": incompatible},
+                config_ok=True,
+                boundary_ok=True,
+                client_contract_ok=False,
+                operable_ok=False,
+            ),
+            provider=normalized,
+            runtime_mode=runtime_mode,
+            distribution_profile=distribution_profile,
+            required_readiness_level=required_readiness_level,
+            acceptance_manifest_path=acceptance_manifest_path,
+            execute_acceptance_suite=execute_acceptance_suite,
+            config_path=config_path,
+            broker_client_factory=broker_client_factory,
         )
     if sample_payloads:
         sample_check = _validate_broker_sample_payloads(sample_payloads, strict_contract_mapping=strict_contract_mapping)
         if sample_check is not None:
-            return sample_check
-    return _build_result(
-        name="broker",
-        ok=True,
-        message=(
-            f"{normalized.upper()} 运行时检查通过；"
-            f"当前为{'严格' if strict_contract_mapping else '兼容'}映射模式"
+            return _decorate_broker_result(
+                sample_check,
+                provider=normalized,
+                runtime_mode=runtime_mode,
+                distribution_profile=distribution_profile,
+                required_readiness_level=required_readiness_level,
+                acceptance_manifest_path=acceptance_manifest_path,
+                execute_acceptance_suite=execute_acceptance_suite,
+                config_path=config_path,
+                broker_client_factory=broker_client_factory,
+            )
+    return _decorate_broker_result(
+        _build_result(
+            name="broker",
+            ok=True,
+            message=(
+                f"{normalized.upper()} 运行时检查通过；"
+                f"当前为{'严格' if strict_contract_mapping else '兼容'}映射模式"
+            ),
+            details={
+                "provider": normalized,
+                "runtime_mode": runtime_mode,
+                "client_checked": True,
+                "mapping_mode": "strict" if strict_contract_mapping else "lenient",
+            },
+            config_ok=True,
+            boundary_ok=True,
+            client_contract_ok=True,
+            operable_ok=True,
+            acceptance_ok=True,
+            recovery_ok=True,
+            readiness_level="operable",
         ),
-        details={
-            "provider": normalized,
-            "runtime_mode": runtime_mode,
-            "client_checked": True,
-            "mapping_mode": "strict" if strict_contract_mapping else "lenient",
-        },
-        config_ok=True,
-        boundary_ok=True,
-        client_contract_ok=True,
-        operable_ok=True,
+        provider=normalized,
+        runtime_mode=runtime_mode,
+        distribution_profile=distribution_profile,
+        required_readiness_level=required_readiness_level,
+        acceptance_manifest_path=acceptance_manifest_path,
+        execute_acceptance_suite=execute_acceptance_suite,
+        config_path=config_path,
+        broker_client_factory=broker_client_factory,
     )
 
 
-def summarize_runtime_results(results: Iterable[dict[str, Any] | RuntimeCheckResult]) -> dict[str, bool]:
+def summarize_runtime_results(
+    results: Iterable[dict[str, Any] | RuntimeCheckResult],
+    *,
+    include_extended: bool = False,
+) -> dict[str, Any]:
     """汇总多项运行前检查的分层能力状态。"""
-    aggregated = {
+    core_summary = {
         "config_ok": True,
         "boundary_ok": True,
         "client_contract_ok": True,
         "operable_ok": True,
     }
+    extended_summary = {
+        "acceptance_ok": True,
+        "recovery_ok": True,
+    }
+    readiness_levels: list[str] = []
+    required_readiness_ok = True
     for item in results:
         payload = item.to_dict() if isinstance(item, RuntimeCheckResult) else item
         capability = payload.get("capability") or {}
-        for key in aggregated:
-            aggregated[key] = aggregated[key] and bool(capability.get(key))
-    return aggregated
+        for key in core_summary:
+            core_summary[key] = core_summary[key] and bool(capability.get(key))
+        if payload.get("name") == "broker":
+            for key in extended_summary:
+                extended_summary[key] = extended_summary[key] and bool(capability.get(key))
+            level = capability.get("readiness_level")
+            if level:
+                readiness_levels.append(str(level))
+            details = payload.get("details") or {}
+            current = str(details.get("current_readiness_level") or capability.get("readiness_level") or "config_validated")
+            required = str(details.get("required_readiness_level") or "config_validated")
+            acceptance_error = details.get("acceptance_error")
+            if not is_readiness_sufficient(current, required):
+                required_readiness_ok = False
+            required_level = BrokerReadinessLevel.CONFIG_VALIDATED
+            try:
+                required_level = BrokerReadinessLevel[str(required).strip().upper()]
+            except KeyError:
+                required_level = BrokerReadinessLevel.CONFIG_VALIDATED
+            if acceptance_error and required_level >= BrokerReadinessLevel.STAGING_ACCEPTED:
+                required_readiness_ok = False
+            required_readiness_ok = required_readiness_ok and bool(payload.get("ok"))
+    if not include_extended:
+        return core_summary
+    if readiness_levels:
+        minimum_level = min((BrokerReadinessLevel[str(item).strip().upper()] for item in readiness_levels), default=BrokerReadinessLevel.CONFIG_VALIDATED)
+        minimum_readiness_level = minimum_level.name.lower()
+    else:
+        minimum_readiness_level = "config_validated"
+    return {
+        **core_summary,
+        **extended_summary,
+        "minimum_readiness_level": minimum_readiness_level,
+        "required_readiness_ok": required_readiness_ok,
+    }
+

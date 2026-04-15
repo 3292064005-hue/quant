@@ -51,11 +51,39 @@ class StrategyService:
         strategy_repository: StrategyRepository,
         component_registry: ComponentRegistry | None = None,
         research_run_repository: ResearchRunRepository | None = None,
+        plugin_manager=None,
+        plugin_context=None,
     ) -> None:
         self.config = config
         self.strategy_repository = strategy_repository
         self.component_registry = component_registry or self._build_default_component_registry()
         self.research_run_repository = research_run_repository
+        self.plugin_manager = plugin_manager
+        self.plugin_context = plugin_context
+        self._last_loaded_strategy = None
+
+    def bind_plugin_manager(self, plugin_manager, plugin_context=None) -> None:
+        """在正式装配完成后回填 plugin manager。
+
+        Args:
+            plugin_manager: 已完成注册、后续会在上下文 ready 阶段统一 configure 的插件管理器。
+            plugin_context: 可选上下文；为空时保持现有上下文引用。
+
+        Boundary Behavior:
+            - 允许在 service 已构造后执行回填，避免 runtime assembly 因装配顺序漂移导致 plugin hook 失效；
+            - 若当前 service 已经装载过策略，则会同步把 plugin manager 回填到已绑定的 execution runtime。
+        """
+        self.plugin_manager = plugin_manager
+        if plugin_context is not None:
+            self.plugin_context = plugin_context
+        loaded_strategy = self._last_loaded_strategy
+        if loaded_strategy is None:
+            return
+        execution_runtime = getattr(loaded_strategy, "_execution_runtime", None)
+        if execution_runtime is None:
+            return
+        execution_runtime.plugin_manager = plugin_manager
+        execution_runtime.plugin_context = self.plugin_context
 
     def build_default(self, *, research_signal_run_id: str | None = None):
         """兼容旧入口：构建当前配置指定的策略。"""
@@ -89,6 +117,7 @@ class StrategyService:
         strategy._strategy_init_params = dict(init_params)
         strategy._execution_runtime = runtime
         strategy._bound_research_signal_run_id = resolved_signal_run_id
+        self._last_loaded_strategy = strategy
         self.strategy_repository.save(
             strategy_id=self.config.strategy.strategy_id,
             strategy_type=type(strategy).__name__,
@@ -356,6 +385,7 @@ class StrategyService:
             "benchmark": manifest.benchmark_component,
             "capability_tags": list(manifest.capability_tags),
             "execution_contract": "component_runtime",
+            "target_intent_contract": "target_intent.v1",
             "signal_source_run_id": research_signal_run_id,
             "promotion_contract_required": bool(research_signal_run_id),
         }
@@ -387,6 +417,8 @@ class StrategyService:
             signal_component=signal_component,
             portfolio_component=portfolio_component,
             research_signal_payload=research_signal_payload,
+            plugin_manager=self.plugin_manager,
+            plugin_context=self.plugin_context,
         )
         return runtime, promotion_package
 

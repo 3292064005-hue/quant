@@ -1,17 +1,20 @@
 """按 runtime lane 装配上下文。"""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from a_share_quant.app.assembly_steps import (
     AssemblyValidationError,
+    bind_plugin_manager_to_runtime,
     build_base_context,
     build_broker,
+    configure_plugin_manager,
+    create_plugin_manager,
     install_backtest_stack,
     install_data_stack,
     install_operator_trade_stack,
-    install_plugin_manager,
     install_registries,
     install_report_stack,
     install_strategy_stack,
@@ -36,6 +39,19 @@ class AssemblyRequest:
     include_trade_orchestrator: bool = False
 
 
+@dataclass(slots=True, frozen=True)
+class AssemblyPlanStep:
+    """显式装配步骤。
+
+    Notes:
+        - 通过命名步骤把组合根从“散落的 if/else”收敛为正式安装计划；
+        - 计划本身可以被测试与审计读取，从而验证某条 lane 到底装配了哪些能力。
+    """
+
+    name: str
+    installer: Callable[[AppContext], None]
+
+
 class RuntimeAssembly:
     """基于 runtime lane 的正式装配器。"""
 
@@ -54,19 +70,8 @@ class RuntimeAssembly:
         """根据装配请求构建上下文。"""
         self._validate_request(config, request)
         context = build_base_context(config, store)
-        install_registries(context)
-
-        if request.include_data_service or request.include_backtest_service or request.include_trade_orchestrator:
-            install_data_stack(context)
-
-        if request.include_data_service or request.include_strategy_service or request.include_backtest_service:
-            register_strategy_components(context)
-
-        if request.include_strategy_service or request.include_backtest_service:
-            install_strategy_stack(context)
-
-        if request.include_report_service or request.include_backtest_service or request.include_trade_orchestrator:
-            install_report_stack(context)
+        for step in self._resolve_pre_broker_plan(request):
+            step.installer(context)
 
         if request.include_broker:
             context.broker = build_broker(
@@ -76,14 +81,45 @@ class RuntimeAssembly:
             )
             context.broker.connect()
 
-        if request.include_backtest_service:
-            install_backtest_stack(context)
-        if request.include_trade_orchestrator:
-            install_operator_trade_stack(context)
-
+        for step in self._resolve_post_broker_plan(request):
+            step.installer(context)
         register_workflows(context, self.profile)
-        install_plugin_manager(context)
+        bind_plugin_manager_to_runtime(context)
+        configure_plugin_manager(context)
         return context
+
+    def describe_plan(self, request: AssemblyRequest) -> list[str]:
+        """返回该请求的正式装配步骤名称。"""
+        names = [step.name for step in self._resolve_pre_broker_plan(request)]
+        if request.include_broker:
+            names.append("install_broker")
+        names.extend(step.name for step in self._resolve_post_broker_plan(request))
+        names.extend(["register_workflows", "bind_plugin_manager_to_runtime", "configure_plugin_manager"])
+        return names
+
+    def _resolve_pre_broker_plan(self, request: AssemblyRequest) -> list[AssemblyPlanStep]:
+        plan = [
+            AssemblyPlanStep("install_registries", install_registries),
+            AssemblyPlanStep("create_plugin_manager", create_plugin_manager),
+        ]
+        if request.include_data_service or request.include_backtest_service or request.include_trade_orchestrator:
+            plan.append(AssemblyPlanStep("install_data_stack", install_data_stack))
+        if request.include_data_service or request.include_strategy_service or request.include_backtest_service:
+            plan.append(AssemblyPlanStep("register_strategy_components", register_strategy_components))
+        if request.include_strategy_service or request.include_backtest_service:
+            plan.append(AssemblyPlanStep("install_strategy_stack", install_strategy_stack))
+        if request.include_report_service or request.include_backtest_service or request.include_trade_orchestrator:
+            plan.append(AssemblyPlanStep("install_report_stack", install_report_stack))
+        return plan
+
+    @staticmethod
+    def _resolve_post_broker_plan(request: AssemblyRequest) -> list[AssemblyPlanStep]:
+        plan: list[AssemblyPlanStep] = []
+        if request.include_backtest_service:
+            plan.append(AssemblyPlanStep("install_backtest_stack", install_backtest_stack))
+        if request.include_trade_orchestrator:
+            plan.append(AssemblyPlanStep("install_operator_trade_stack", install_operator_trade_stack))
+        return plan
 
     def _validate_request(self, config, request: AssemblyRequest) -> None:
         runtime_lane = get_runtime_profile(config.app.runtime_mode)
@@ -137,6 +173,7 @@ _ASSEMBLIES: dict[RuntimeLane, RuntimeAssembly] = {
     RuntimeLane.PAPER_TRADE: PaperTradeAssembly(),
     RuntimeLane.LIVE_TRADE: LiveTradeAssembly(),
 }
+
 
 
 def resolve_runtime_assembly(runtime_mode: str) -> RuntimeAssembly:

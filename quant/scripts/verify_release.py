@@ -14,7 +14,15 @@ import tokenize
 import venv
 import zipfile
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 from typing import Iterable, Sequence
+
+from a_share_quant.app.distribution_profile_contract import get_distribution_profile_spec
+from scripts.build_clean_release import prepare_project_staging
+from scripts.sync_release_metadata import sync_release_metadata
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_STATIC_ROOTS = ("a_share_quant", "scripts", "tests")
@@ -29,6 +37,7 @@ _EXPECTED_CONSOLE_SCRIPTS = {
     "a-share-quant-research",
     "a-share-quant-operator-snapshot",
     "a-share-quant-operator-submit-order",
+    "a-share-quant-operator-submit-signal",
     "a-share-quant-operator-reconcile-session",
     "a-share-quant-operator-sync-session",
     "a-share-quant-operator-run-supervisor",
@@ -42,6 +51,24 @@ def _pythonpath_with(*paths: Path) -> str:
     if existing:
         parts.append(existing)
     return os.pathsep.join(parts)
+
+
+def _host_runtime_site_paths() -> tuple[Path, ...]:
+    """返回当前解释器可见的运行时 site-packages 路径，供隔离 smoke 复用。"""
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for entry in sys.path:
+        if not entry:
+            continue
+        normalized = str(entry)
+        if "site-packages" not in normalized and "dist-packages" not in normalized and not normalized.startswith("/opt/pyvenv"):
+            continue
+        path = Path(normalized)
+        if not path.exists() or normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(path)
+    return tuple(candidates)
 
 
 
@@ -84,7 +111,9 @@ def _run_capture(
 
 def _read_installed_console_scripts(install_root: Path) -> set[str]:
     """读取安装态 wheel 的 console_scripts 声明。"""
-    candidates = sorted(install_root.glob("**/*.dist-info/entry_points.txt"))
+    candidates = sorted(install_root.glob("**/a_share_quant_workstation-*.dist-info/entry_points.txt"))
+    if not candidates:
+        candidates = sorted(install_root.glob("**/*.dist-info/entry_points.txt"))
     if not candidates:
         raise SystemExit("安装态 wheel 缺少 entry_points.txt")
     parser = configparser.ConfigParser()
@@ -141,17 +170,22 @@ def _parse_literal_payload(text: str) -> dict[str, object]:
 
 
 
-def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, cwd: Path | str | None = None) -> None:
+def _run_operator_acceptance_smoke(
+    *,
+    command_prefix: list[str] | None = None,
+    cwd: Path | str | None = None,
+    env_extra: dict[str, str] | None = None,
+) -> None:
     """执行仓内自带 operator acceptance profile 的发布前烟雾链。"""
     command_prefix = command_prefix or [sys.executable]
     with tempfile.TemporaryDirectory(prefix="verify_operator_") as temp_dir:
         temp_root = Path(temp_dir)
         config_path = _write_runtime_bound_config(PROJECT_ROOT / "configs/operator_paper_trade_demo.yaml", temp_root / "operator_demo.yaml")
         sample_csv = PROJECT_ROOT / "sample_data/daily_bars.csv"
-        _run([*command_prefix, "scripts/init_db.py", "--config", str(config_path)] if command_prefix == [sys.executable] else [*command_prefix, "--config", str(config_path)], cwd=cwd, suppress_output=True)
+        _run([*command_prefix, "scripts/init_db.py", "--config", str(config_path)] if command_prefix == [sys.executable] else [*command_prefix, "--config", str(config_path)], cwd=cwd, suppress_output=True, env_extra=env_extra)
         if command_prefix == [sys.executable]:
-            _run([*command_prefix, "scripts/sync_market_data.py", "--config", str(config_path), "--csv", str(sample_csv), "--provider", "csv"], cwd=cwd, suppress_output=True)
-            _run([*command_prefix, "scripts/operator_snapshot.py", "--config", str(config_path)], cwd=cwd, suppress_output=True)
+            _run([*command_prefix, "scripts/sync_market_data.py", "--config", str(config_path), "--csv", str(sample_csv), "--provider", "csv"], cwd=cwd, suppress_output=True, env_extra=env_extra)
+            _run([*command_prefix, "scripts/operator_snapshot.py", "--config", str(config_path)], cwd=cwd, suppress_output=True, env_extra=env_extra)
             submit_output = _run_capture([
                 *command_prefix,
                 "scripts/operator_submit_order.py",
@@ -167,16 +201,16 @@ def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, c
                 "100",
                 "--trade-date",
                 "2026-01-05",
-            ], cwd=cwd)
+            ], cwd=cwd, env_extra=env_extra)
         else:
-            _run([*command_prefix, "--config", str(config_path)], cwd=cwd, suppress_output=True)
+            _run([*command_prefix, "--config", str(config_path)], cwd=cwd, suppress_output=True, env_extra=env_extra)
             sync_cmd = _resolve_console_script_path(Path(command_prefix[0]).parents[1], "a-share-quant-sync-market-data")
             snapshot_cmd = _resolve_console_script_path(Path(command_prefix[0]).parents[1], "a-share-quant-operator-snapshot")
             submit_cmd = _resolve_console_script_path(Path(command_prefix[0]).parents[1], "a-share-quant-operator-submit-order")
             sync_session_cmd = _resolve_console_script_path(Path(command_prefix[0]).parents[1], "a-share-quant-operator-sync-session")
             supervisor_cmd = _resolve_console_script_path(Path(command_prefix[0]).parents[1], "a-share-quant-operator-run-supervisor")
-            _run([str(sync_cmd), "--config", str(config_path), "--provider", "csv", "--csv", str(sample_csv)], cwd=cwd, suppress_output=True)
-            _run([str(snapshot_cmd), "--config", str(config_path)], cwd=cwd, suppress_output=True)
+            _run([str(sync_cmd), "--config", str(config_path), "--provider", "csv", "--csv", str(sample_csv)], cwd=cwd, suppress_output=True, env_extra=env_extra)
+            _run([str(snapshot_cmd), "--config", str(config_path)], cwd=cwd, suppress_output=True, env_extra=env_extra)
             submit_output = _run_capture([
                 str(submit_cmd),
                 "--config",
@@ -191,7 +225,7 @@ def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, c
                 "100",
                 "--trade-date",
                 "2026-01-05",
-            ], cwd=cwd)
+            ], cwd=cwd, env_extra=env_extra)
         submit_payload = json.loads(submit_output)
         session_id = submit_payload["session"]["session_id"]
         if submit_payload["session"]["status"] != "RECOVERY_REQUIRED":
@@ -205,7 +239,7 @@ def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, c
                 str(config_path),
                 "--session-id",
                 session_id,
-            ], cwd=cwd)
+            ], cwd=cwd, env_extra=env_extra)
         else:
             sync_session_cmd = _resolve_console_script_path(Path(command_prefix[0]).parents[1], "a-share-quant-operator-sync-session")
             sync_output = _run_capture([
@@ -214,7 +248,7 @@ def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, c
                 str(config_path),
                 "--session-id",
                 session_id,
-            ], cwd=cwd)
+            ], cwd=cwd, env_extra=env_extra)
         sync_payload = json.loads(sync_output)
         if sync_payload["session"]["status"] != "COMPLETED":
             raise SystemExit("operator acceptance smoke: sync_session 未完成会话")
@@ -235,7 +269,7 @@ def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, c
                 "100",
                 "--trade-date",
                 "2026-01-05",
-            ], cwd=cwd)
+            ], cwd=cwd, env_extra=env_extra)
             submit_payload_2 = json.loads(submit_output_2)
             session_id_2 = submit_payload_2["session"]["session_id"]
             supervisor_output = _run_capture([
@@ -248,7 +282,7 @@ def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, c
                 "--max-loops",
                 "1",
                 "--stop-when-idle",
-            ], cwd=cwd)
+            ], cwd=cwd, env_extra=env_extra)
         else:
             submit_cmd = _resolve_console_script_path(Path(command_prefix[0]).parents[1], "a-share-quant-operator-submit-order")
             supervisor_cmd = _resolve_console_script_path(Path(command_prefix[0]).parents[1], "a-share-quant-operator-run-supervisor")
@@ -266,7 +300,7 @@ def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, c
                 "100",
                 "--trade-date",
                 "2026-01-05",
-            ], cwd=cwd)
+            ], cwd=cwd, env_extra=env_extra)
             submit_payload_2 = json.loads(submit_output_2)
             session_id_2 = submit_payload_2["session"]["session_id"]
             supervisor_output = _run_capture([
@@ -278,7 +312,7 @@ def _run_operator_acceptance_smoke(*, command_prefix: list[str] | None = None, c
                 "--max-loops",
                 "1",
                 "--stop-when-idle",
-            ], cwd=cwd)
+            ], cwd=cwd, env_extra=env_extra)
         supervisor_payload = json.loads(supervisor_output)
         if session_id_2 not in supervisor_payload.get("completed_session_ids", []):
             raise SystemExit("operator acceptance smoke: supervisor 未完成会话")
@@ -553,17 +587,20 @@ def _run_optional_quality_tools() -> list[str]:
 
 def _run_installed_wheel_smoke(temp_dir: str) -> None:
     """验证安装态 wheel 的 import、bundled config 与 launcher stub。"""
+    staging_dir = Path(temp_dir) / "project"
+    prepare_project_staging(PROJECT_ROOT, staging_dir)
     wheel_dir = Path(temp_dir) / "wheel"
     venv_dir = Path(temp_dir) / "venv"
     wheel_dir.mkdir(parents=True, exist_ok=True)
-    _run([sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", str(wheel_dir)], suppress_output=True)
+    _run([sys.executable, "-m", "pip", "wheel", str(staging_dir), "--no-deps", "-w", str(wheel_dir)], cwd=staging_dir, suppress_output=True)
     wheels = sorted(wheel_dir.glob("*.whl"))
     if not wheels:
         raise SystemExit("wheel 构建成功但未产出 .whl 文件")
 
-    venv.EnvBuilder(with_pip=True, clear=True).create(venv_dir)
+    venv.EnvBuilder(with_pip=True, clear=True, system_site_packages=True).create(venv_dir)
     venv_python = _resolve_venv_python(venv_dir)
     _run([str(venv_python), "-m", "pip", "install", "--no-deps", str(wheels[-1])], suppress_output=True)
+    runtime_env = {"PYTHONPATH": _pythonpath_with(*_host_runtime_site_paths())}
 
     smoke_code = (
         "import a_share_quant; "
@@ -573,7 +610,7 @@ def _run_installed_wheel_smoke(temp_dir: str) -> None:
         "assert cfg.broker.client_factory; "
         "print(a_share_quant.__name__)"
     )
-    _run([str(venv_python), "-c", smoke_code], cwd=temp_dir, suppress_output=True)
+    _run([str(venv_python), "-c", smoke_code], cwd=temp_dir, suppress_output=True, env_extra=runtime_env)
 
     installed_scripts = _read_installed_console_scripts(venv_dir)
     missing = sorted(_EXPECTED_CONSOLE_SCRIPTS - installed_scripts)
@@ -582,48 +619,76 @@ def _run_installed_wheel_smoke(temp_dir: str) -> None:
 
     for script_name in sorted(_EXPECTED_CONSOLE_SCRIPTS):
         launcher = _resolve_console_script_path(venv_dir, script_name)
-        _run([str(launcher), "--help"], cwd=temp_dir, suppress_output=True)
+        _run([str(launcher), "--help"], cwd=temp_dir, suppress_output=True, env_extra=runtime_env)
 
     # 真实执行生成后的 launcher stub，而非只校验 entry_points 元数据。
     runtime_config = _write_runtime_bound_config(PROJECT_ROOT / "configs/operator_paper_trade_demo.yaml", Path(temp_dir) / "installed_operator_demo.yaml")
     check_runtime_cmd = _resolve_console_script_path(venv_dir, "a-share-quant-check-runtime")
-    _run([str(check_runtime_cmd), "--config", str(runtime_config), "--strict"], cwd=temp_dir, suppress_output=True)
+    _run([str(check_runtime_cmd), "--config", str(runtime_config), "--strict"], cwd=temp_dir, suppress_output=True, env_extra=runtime_env)
 
     init_db_cmd = _resolve_console_script_path(venv_dir, "a-share-quant-init-db")
-    _run([str(init_db_cmd), "--config", str(runtime_config)], cwd=temp_dir, suppress_output=True)
-    _run_operator_acceptance_smoke(command_prefix=[str(init_db_cmd)], cwd=temp_dir)
+    _run([str(init_db_cmd), "--config", str(runtime_config)], cwd=temp_dir, suppress_output=True, env_extra=runtime_env)
+    _run_operator_acceptance_smoke(command_prefix=[str(init_db_cmd)], cwd=temp_dir, env_extra=runtime_env)
 
+
+
+def _verify_release_manifest_surface(*, profile: str, names: list[str], handle: zipfile.ZipFile) -> None:
+    manifest_payload = json.loads(handle.read("distribution_manifest.json").decode("utf-8"))
+    spec = get_distribution_profile_spec(profile)
+    if manifest_payload.get("distribution_profile") != profile:
+        raise SystemExit(f"clean release manifest.profile 不一致: {manifest_payload!r}")
+    if manifest_payload.get("project_name") != spec.project_name:
+        raise SystemExit(f"clean release manifest.project_name 不一致: {manifest_payload.get('project_name')} != {spec.project_name}")
+    selected_requirements = str(manifest_payload.get("selected_requirements") or "")
+    if selected_requirements != spec.selected_requirements:
+        raise SystemExit(
+            f"clean release manifest.selected_requirements 不一致: {selected_requirements} != {spec.selected_requirements}"
+        )
+    if selected_requirements not in names:
+        raise SystemExit(f"clean release 缺少 manifest 声明的 requirements 文件: {selected_requirements}")
 
 
 def _verify_clean_release_archive() -> None:
-    """构建并检查干净发布包，避免 staging/egg-info/缓存污染回归。"""
+    """构建并检查干净发布包，避免 staging/egg-info/缓存污染与 profile 契约回归。"""
+    profile_name_sets: dict[str, set[str]] = {}
     with tempfile.TemporaryDirectory(prefix="verify_release_") as temp_dir:
-        archive_path = Path(temp_dir) / "release.zip"
-        _run([sys.executable, "scripts/build_clean_release.py", "--source", ".", "--output", str(archive_path)])
-        with zipfile.ZipFile(archive_path) as handle:
-            names = handle.namelist()
-            bad_member = handle.testzip()
-        if bad_member is not None:
-            raise SystemExit(f"clean release zip 损坏，首个坏成员: {bad_member}")
-        forbidden_fragments = ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "runtime/"]
-        for fragment in forbidden_fragments:
-            if any(fragment in name for name in names):
-                raise SystemExit(f"clean release 仍包含污染物片段: {fragment}")
-        if any(name.endswith(".egg-info/") or ".egg-info/" in name for name in names):
-            raise SystemExit("clean release 仍包含 egg-info 元数据目录")
-        if any(part.startswith(".") and part.endswith("_staging") for name in names for part in Path(name).parts):
-            raise SystemExit("clean release 仍包含隐藏 staging 目录")
-
+        for profile in ("core", "workstation", "production"):
+            archive_path = Path(temp_dir) / f"release_{profile}.zip"
+            _run([sys.executable, "scripts/build_clean_release.py", "--source", ".", "--output", str(archive_path), "--distribution-profile", profile])
+            with zipfile.ZipFile(archive_path) as handle:
+                names = handle.namelist()
+                bad_member = handle.testzip()
+                profile_marker = handle.read("release_profile.txt").decode("utf-8")
+                _verify_release_manifest_surface(profile=profile, names=names, handle=handle)
+            if bad_member is not None:
+                raise SystemExit(f"clean release zip 损坏，首个坏成员: {bad_member}")
+            if profile_marker != f"distribution_profile={profile}\n":
+                raise SystemExit(f"clean release profile 标记不一致: {profile_marker!r}")
+            forbidden_fragments = ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "runtime/"]
+            for fragment in forbidden_fragments:
+                if any(fragment in name for name in names):
+                    raise SystemExit(f"clean release 仍包含污染物片段: {fragment}")
+            if any(name.endswith(".egg-info/") or ".egg-info/" in name for name in names):
+                raise SystemExit("clean release 仍包含 egg-info 元数据目录")
+            if any(part.startswith(".") and part.endswith("_staging") for name in names for part in Path(name).parts):
+                raise SystemExit("clean release 仍包含隐藏 staging 目录")
+            profile_name_sets[profile] = set(names)
+    if profile_name_sets["core"] == profile_name_sets["workstation"] or profile_name_sets["production"] == profile_name_sets["workstation"]:
+        raise SystemExit("clean release profile 发行物没有形成真实差异")
 
 
 def main() -> int:
     """执行全仓发布前质量门禁。"""
+    changed_release_metadata = sync_release_metadata(check_only=True)
+    if changed_release_metadata:
+        raise SystemExit(f"release metadata 未同步: {', '.join(changed_release_metadata)}")
     _run_builtin_static_gate()
     skipped_tools = _run_optional_quality_tools()
     _run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"])
     _run([sys.executable, "-m", "a_share_quant", "--help"], suppress_output=True)
     _run([sys.executable, "scripts/operator_snapshot.py", "--help"], suppress_output=True)
     _run([sys.executable, "scripts/operator_submit_order.py", "--help"], suppress_output=True)
+    _run([sys.executable, "scripts/operator_submit_signal.py", "--help"], suppress_output=True)
     _run([sys.executable, "scripts/operator_reconcile_session.py", "--help"], suppress_output=True)
     _run([sys.executable, "scripts/operator_sync_session.py", "--help"], suppress_output=True)
     _run([sys.executable, "scripts/operator_run_supervisor.py", "--help"], suppress_output=True)
@@ -641,6 +706,7 @@ def main() -> int:
         skipped_messages.append("可选运行面 smoke 已跳过：" + ", ".join(skipped_optional_surfaces) + "。")
     for message in skipped_messages:
         print(f"[verify_release] {message}")
+    print("[verify_release] PASS")
     return 0
 
 

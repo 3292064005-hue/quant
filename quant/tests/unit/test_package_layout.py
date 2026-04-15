@@ -4,6 +4,8 @@ from pathlib import Path
 
 from setuptools import find_packages
 
+from importlib import resources
+
 EXPECTED_PACKAGES = {
     'a_share_quant',
     'a_share_quant.adapters',
@@ -13,12 +15,16 @@ EXPECTED_PACKAGES = {
     'a_share_quant.config',
     'a_share_quant.core',
     'a_share_quant.core.rules',
+    'a_share_quant.demo',
     'a_share_quant.domain',
     'a_share_quant.engines',
     'a_share_quant.engines.execution_models',
+    'a_share_quant.execution',
     'a_share_quant.plugins',
     'a_share_quant.providers',
     'a_share_quant.repositories',
+    'a_share_quant.resources',
+    'a_share_quant.sample_data',
     'a_share_quant.services',
     'a_share_quant.storage',
     'a_share_quant.strategies',
@@ -38,3 +44,8 @@ def test_setuptools_package_discovery_covers_runtime_packages() -> None:
     discovered = set(find_packages(include=['a_share_quant*']))
     missing = EXPECTED_PACKAGES - discovered
     assert not missing, f'安装态仍缺少包发现: {sorted(missing)}'
+
+
+def test_packaged_sample_data_resource_exists() -> None:
+    sample = resources.files('a_share_quant.sample_data').joinpath('daily_bars.csv')
+    assert sample.is_file(), '安装态 sample_data/daily_bars.csv 必须存在，避免默认 CLI 回落到源码相对路径'

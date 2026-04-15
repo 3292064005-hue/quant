@@ -8,8 +8,8 @@ from a_share_quant.ui.panels.common import build_key_value_group, build_page, bu
 
 def build_import_audit_panel(operations_snapshot: dict[str, Any]) -> object:
     """展示导入审计摘要。"""
-    latest_import = operations_snapshot.get("latest_import_run") or {}
-    quality_events = operations_snapshot.get("latest_import_quality_events", [])
+    latest_import = operations_snapshot.get("ui_latest_import_run") or {}
+    quality_events = operations_snapshot.get("ui_latest_import_quality_events", [])
     return build_page(
         "导入审计",
         [

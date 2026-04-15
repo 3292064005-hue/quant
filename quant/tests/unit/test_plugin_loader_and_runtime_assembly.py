@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from a_share_quant.app.bootstrap import bootstrap_operator_context
+from a_share_quant.app.bootstrap import bootstrap, bootstrap_operator_context, bootstrap_trade_operator_context
 from a_share_quant.app.plugin_loader import builtin_plugin_names, resolve_plugins
 from a_share_quant.config.loader import ConfigLoader
 
@@ -111,3 +111,55 @@ def test_runtime_operator_lane_keeps_report_and_research_workflows_but_no_backte
     with bootstrap_operator_context(str(config_path), broker_clients={"ptrade": _DummyQmtClient()}) as context:
         workflow_names = {entry.name for entry in context.require_workflow_registry().list_entries()}
         assert workflow_names == {"workflow.report", "workflow.replay", "workflow.research"}
+
+
+def test_bootstrap_backtest_context_binds_plugin_manager_to_strategy_service_and_runtime(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, runtime_mode="research_backtest", provider="mock")
+
+    with bootstrap(str(config_path)) as context:
+        plugin_manager = context.require_plugin_manager()
+        strategy_service = context.require_strategy_service()
+        assert strategy_service.plugin_manager is plugin_manager
+        strategy = strategy_service.build_default()
+        assert getattr(strategy, "_execution_runtime").plugin_manager is plugin_manager
+
+
+def test_bootstrap_trade_operator_context_binds_plugin_manager_to_trade_orchestrator(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, runtime_mode="paper_trade", provider="ptrade")
+
+    with bootstrap_trade_operator_context(str(config_path), broker_clients={"ptrade": _DummyQmtClient()}) as context:
+        plugin_manager = context.require_plugin_manager()
+        orchestrator = context.require_trade_orchestrator_service()
+        workflow = context.require_workflow_registry().get("workflow.operator_trade")
+        assert orchestrator.plugin_manager is plugin_manager
+        assert orchestrator.progress_service.plugin_manager is plugin_manager
+        assert workflow.plugin_manager is plugin_manager
+
+
+def test_runtime_assembly_exposes_explicit_install_plan_and_layered_context(tmp_path: Path) -> None:
+    from a_share_quant.app.context import OperatorRuntimeContext, PersistenceContext, RegistryContext, ResearchRuntimeContext
+    from a_share_quant.app.runtime_assembly import AssemblyRequest, resolve_runtime_assembly
+
+    config_path = _write_config(tmp_path, runtime_mode="paper_trade", provider="ptrade")
+    config = ConfigLoader.load(str(config_path))
+    assembly = resolve_runtime_assembly(config.app.runtime_mode)
+    plan = assembly.describe_plan(
+        AssemblyRequest(
+            include_data_service=True,
+            include_report_service=True,
+            include_broker=True,
+            require_operator_lane=True,
+            include_trade_orchestrator=True,
+        )
+    )
+    assert plan[:3] == ["install_registries", "create_plugin_manager", "install_data_stack"]
+    assert "install_operator_trade_stack" in plan
+    assert plan[-2:] == ["bind_plugin_manager_to_runtime", "configure_plugin_manager"]
+
+    with bootstrap_trade_operator_context(str(config_path), broker_clients={"ptrade": _DummyQmtClient()}) as context:
+        assert isinstance(context.require_persistence_context(), PersistenceContext)
+        assert isinstance(context.require_registry_context(), RegistryContext)
+        assert isinstance(context.require_research_runtime_context(), ResearchRuntimeContext)
+        assert isinstance(context.require_operator_runtime_context(), OperatorRuntimeContext)
+        assert context.require_operator_runtime_context().trade_orchestrator_service is context.require_trade_orchestrator_service()
+        assert context.require_research_runtime_context().report_service is context.require_report_service()

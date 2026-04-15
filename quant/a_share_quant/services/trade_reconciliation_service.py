@@ -358,6 +358,7 @@ class TradeReconciliationService:
         order_count = len(orders)
         rejected_count = sum(1 for order in orders if order.status in {OrderStatus.PRE_TRADE_REJECTED, OrderStatus.EXECUTION_REJECTED, OrderStatus.REJECTED})
         filled_count = sum(1 for order in orders if order.status in {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED})
+        terminal_non_fill_count = sum(1 for order in orders if order.status in {OrderStatus.CANCELLED, OrderStatus.CANCEL_REJECTED, OrderStatus.EXPIRED})
         pending_follow_up_count = self._count_pending_follow_up_orders(orders)
         if order_count <= 0:
             return TradeSessionStatus.RECOVERY_REQUIRED
@@ -365,8 +366,10 @@ class TradeReconciliationService:
             return TradeSessionStatus.REJECTED
         if pending_follow_up_count > 0:
             return TradeSessionStatus.RECOVERY_REQUIRED
-        if filled_count > 0 and rejected_count > 0:
+        if filled_count > 0 and (rejected_count > 0 or terminal_non_fill_count > 0):
             return TradeSessionStatus.PARTIALLY_COMPLETED
-        if filled_count > 0:
+        if terminal_non_fill_count > 0 and rejected_count > 0:
+            return TradeSessionStatus.PARTIALLY_COMPLETED
+        if filled_count > 0 or terminal_non_fill_count > 0:
             return TradeSessionStatus.COMPLETED
         return TradeSessionStatus.RECOVERY_REQUIRED

@@ -226,12 +226,13 @@ StrategyService (registry / loader)
 - `bootstrap(..., broker_clients={...})` 仍保留为最低层显式注入接口。
 - `bootstrap_operator_context(...)`：保留 paper/live 只读 operator snapshot 装配入口。
 - `bootstrap_trade_operator_context(...)`：新增正式 operator trade 装配入口，负责 paper/live lane 的写路径、命令会话、共享 RiskEngine pre-trade 校验、正式订单实体落库与审计留痕；内部 `order_id` 在服务层与仓储层双重收口，避免跨入口复用时污染历史订单归属。
+- `workflow.operator_trade` 现已同时支持 `submit_orders(...)` 与 `submit_research_signal(...)`：前者服务人工命令单，后者把 research `signal_snapshot` 解析为 `ExecutionIntent / PortfolioDelta / OrderRequest` 后复用同一条 operator 主链。
 - 对于脚本/CLI，新增 `broker.client_factory` / `--broker-client-factory` 作为操作层注入路径。
 - client factory 路径格式为 `package.module:callable`，工厂可返回单个 client，或返回 provider->client 映射。
 - `check_runtime` 若检测到 client factory，会在 shallow 检查之外继续验证客户端方法契约。
 
 
-## 10. v0.5.5 扩展边界
+## 10. v0.5.6 扩展边界
 
 ### 10.1 执行内核
 
@@ -247,6 +248,12 @@ StrategyService (registry / loader)
 - `strategy.research_signal_run_id`：允许把 `workflow.research` 产出的正式 `signal_snapshot` 重新绑定到 `workflow.backtest` 的输入合同
 - `plugins/`：当前内建 `risk / analyser / scheduler / broker / dataset` 五类插件，并支持通过配置启停/外部发现
 - `plugin_manager`：当前除注册/配置外，已补齐 `context_ready / before_workflow_run / after_workflow_run / shutdown` 生命周期与执行留痕
+- 官方 `RuntimeAssembly.build()` 现改为 `base context -> registries -> plugin manager -> services/workflows -> bind -> configure` 顺序；`StrategyService / TradeOrchestratorService / operator workflow` 统一通过 `bind_plugin_manager(...)` 接受迟绑定，避免 plugin 只在 workflow 层生效。
+
+- `AppContext` 已从单体 service locator 拆为显式分层：`PersistenceContext / RegistryContext / ResearchRuntimeContext / OperatorRuntimeContext`。历史字段名仍保留兼容属性，但正式装配、审计与新代码应优先走分层上下文。
+- `RuntimeAssembly` 不再依赖散落的 if/else 隐式拼装，而是暴露显式 `AssemblyPlanStep` 安装计划，可直接审计某个 runtime lane 装了哪些能力。
+- `TradeOrchestratorService` 已收敛为 facade/session coordinator，具体 submit/sync/recovery/audit 逻辑分别下沉到 `OperatorSubmissionPreparationService / OperatorSubmissionExecutionService / OperatorSessionSyncService / OperatorRecoveryService / OperatorTradeAuditService`。
+
 - `app/bootstrap.py`：已降为薄入口；装配逻辑继续拆到 `runtime_assembly.py + assembly_core.py + assembly_broker.py + assembly_registry.py + assembly_services.py`
 
 ### 10.3 UI Operator Plane

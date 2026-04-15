@@ -43,6 +43,8 @@ def install_strategy_stack(context: AppContext) -> None:
         context.strategy_repository,
         component_registry=context.component_registry,
         research_run_repository=context.research_run_repository,
+        plugin_manager=context.plugin_manager,
+        plugin_context=context,
     )
 
 
@@ -90,7 +92,10 @@ def install_operator_trade_stack(context: AppContext) -> None:
         execution_session_repository=context.execution_session_repository,
         reconciliation_service=context.trade_reconciliation_service,
         account_repository=context.account_repository,
+        research_run_repository=context.research_run_repository,
         execution_contract_service=execution_contract_service,
+        plugin_manager=context.plugin_manager,
+        plugin_context=context,
     )
     context.operator_supervisor_service = OperatorSupervisorService(
         config=context.config,

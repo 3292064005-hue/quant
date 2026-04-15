@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any
 
 from a_share_quant.core.utils import json_dumps, new_id, now_iso
@@ -16,6 +17,55 @@ class ExecutionSessionRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
         self.runtime_event_repository = RuntimeEventRepository(store)
+
+    def insert_session(self, summary: TradeSessionSummary) -> TradeSessionSummary:
+        """按给定摘要插入交易会话。
+
+        Args:
+            summary: 已构造完成的正式会话摘要。
+
+        Returns:
+            原样返回 ``summary``，便于调用方继续链式处理。
+        """
+        self.store.execute(
+            """
+            INSERT INTO trade_sessions
+            (
+                session_id, runtime_mode, broker_provider, command_type, command_source, requested_by,
+                status, idempotency_key, requested_trade_date, risk_summary_json, order_count,
+                submitted_count, rejected_count, error_message, account_id, broker_event_cursor,
+                last_synced_at, supervisor_owner, supervisor_lease_expires_at, supervisor_mode,
+                last_supervised_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                summary.session_id,
+                summary.runtime_mode,
+                summary.broker_provider,
+                summary.command_type,
+                summary.command_source,
+                summary.requested_by,
+                summary.status.value,
+                summary.idempotency_key,
+                summary.requested_trade_date,
+                json_dumps(summary.risk_summary),
+                summary.order_count,
+                summary.submitted_count,
+                summary.rejected_count,
+                summary.error_message,
+                summary.account_id,
+                summary.broker_event_cursor,
+                summary.last_synced_at,
+                summary.supervisor_owner,
+                summary.supervisor_lease_expires_at,
+                summary.supervisor_mode,
+                summary.last_supervised_at,
+                summary.created_at,
+                summary.updated_at,
+            ),
+        )
+        return summary
 
     def create_session(
         self,
@@ -274,33 +324,38 @@ class ExecutionSessionRepository:
         )
         return rowcount > 0
 
-    def append_event(self, session_id: str, *, event_type: str, level: str, payload: dict[str, Any] | None = None) -> TradeCommandEvent:
-        event = TradeCommandEvent(
-            event_id=new_id("event"),
-            session_id=session_id,
-            event_type=event_type,
-            level=level,
-            payload=dict(payload or {}),
-            created_at=now_iso(),
-        )
+    def _append_runtime_primary(self, event: TradeCommandEvent) -> None:
+        self.runtime_event_repository.append(source_domain="operator", stream_scope="trade_session", stream_id=event.session_id, event_type=event.event_type, level=event.level, payload=event.payload, occurred_at=event.created_at, event_id=event.event_id)
+
+    def _append_legacy_mirror(self, event: TradeCommandEvent) -> None:
         self.store.execute(
             """
             INSERT INTO trade_command_events (event_id, session_id, event_type, level, payload_json, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                event_type = excluded.event_type,
+                level = excluded.level,
+                payload_json = excluded.payload_json,
+                created_at = excluded.created_at
             """,
             (event.event_id, event.session_id, event.event_type, event.level, json_dumps(event.payload), event.created_at),
         )
-        self.runtime_event_repository.append(
-            source_domain="operator",
-            stream_scope="trade_session",
-            stream_id=session_id,
-            event_type=event.event_type,
-            level=event.level,
-            payload=event.payload,
-            occurred_at=event.created_at,
-            event_id=event.event_id,
-        )
+
+    def append_event(self, session_id: str, *, event_type: str, level: str, payload: dict[str, Any] | None = None) -> TradeCommandEvent:
+        event = TradeCommandEvent(event_id=new_id("event"), session_id=session_id, event_type=event_type, level=level, payload=dict(payload or {}), created_at=now_iso())
+        return self.append_event_record(event)
+
+    def append_event_record(self, event: TradeCommandEvent) -> TradeCommandEvent:
+        self._append_runtime_primary(event)
+        self._append_legacy_mirror(event)
         return event
+
+    def append_events(self, events: Iterable[TradeCommandEvent]) -> list[TradeCommandEvent]:
+        persisted: list[TradeCommandEvent] = []
+        for event in events:
+            persisted.append(self.append_event_record(event))
+        return persisted
 
     def get_by_idempotency_key(self, idempotency_key: str) -> TradeSessionSummary | None:
         rows = self.store.query(
@@ -351,7 +406,7 @@ class ExecutionSessionRepository:
         rows = self.store.query(sql, tuple(params))
         return [self._row_to_summary(dict(row)) for row in rows]
 
-    def list_events(self, session_id: str, *, limit: int = 100) -> list[TradeCommandEvent]:
+    def _load_legacy_session_events(self, session_id: str, *, limit: int = 100) -> list[TradeCommandEvent]:
         rows = self.store.query(
             "SELECT event_id, session_id, event_type, level, payload_json, created_at FROM trade_command_events WHERE session_id = ? ORDER BY created_at ASC LIMIT ?",
             (session_id, limit),
@@ -367,6 +422,48 @@ class ExecutionSessionRepository:
                     level=row["level"],
                     payload=payload,
                     created_at=row["created_at"],
+                )
+            )
+        return events
+
+    def _backfill_runtime_stream_from_legacy(self, session_id: str, *, limit: int = 100) -> list[TradeCommandEvent]:
+        legacy_events = self._load_legacy_session_events(session_id, limit=limit)
+        for event in legacy_events:
+            self.runtime_event_repository.append(
+                source_domain="operator",
+                stream_scope="trade_session",
+                stream_id=session_id,
+                event_type=event.event_type,
+                level=event.level,
+                payload=event.payload,
+                occurred_at=event.created_at,
+                event_id=event.event_id,
+            )
+        return legacy_events
+
+    def list_events(self, session_id: str, *, limit: int = 100) -> list[TradeCommandEvent]:
+        list_stream_events = getattr(self.runtime_event_repository, "list_stream_events", None)
+        if list_stream_events is None:
+            return self._load_legacy_session_events(session_id, limit=limit)
+        runtime_rows = list_stream_events(
+            source_domain="operator",
+            stream_scope="trade_session",
+            stream_id=session_id,
+            limit=limit,
+            newest_first=False,
+        )
+        if not runtime_rows:
+            return self._backfill_runtime_stream_from_legacy(session_id, limit=limit)
+        events: list[TradeCommandEvent] = []
+        for row in runtime_rows:
+            events.append(
+                TradeCommandEvent(
+                    event_id=str(row["event_id"]),
+                    session_id=session_id,
+                    event_type=str(row["event_type"]),
+                    level=str(row.get("level") or "INFO"),
+                    payload=dict(row.get("payload") or {}),
+                    created_at=str(row.get("occurred_at") or now_iso()),
                 )
             )
         return events

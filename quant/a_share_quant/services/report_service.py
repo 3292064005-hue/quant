@@ -7,13 +7,17 @@ from typing import Any
 
 from a_share_quant.core.metrics import compute_metrics, compute_relative_metrics
 from a_share_quant.core.reporting import ReportWriter
+from a_share_quant.contracts.versioned_contracts import parse_run_manifest_contract
 from a_share_quant.core.utils import now_iso
 from a_share_quant.domain.models import BacktestResult, BacktestRunStatus, DataLineage, RunArtifacts
+from a_share_quant.execution.order_lifecycle_service import OrderLifecycleEventService
 from a_share_quant.repositories.account_repository import AccountRepository
 from a_share_quant.repositories.backtest_run_repository import BacktestRunRepository
 from a_share_quant.repositories.data_import_repository import DataImportRepository
 from a_share_quant.repositories.market_repository import MarketRepository
 from a_share_quant.repositories.order_repository import OrderRepository
+from a_share_quant.services.report_rebuild_service import ReportRebuildService
+from a_share_quant.services.report_write_service import ReportWriteService
 
 
 class ReportService:
@@ -42,180 +46,17 @@ class ReportService:
         self.data_import_repository = data_import_repository
         self.annual_trading_days = annual_trading_days
         self.risk_free_rate = risk_free_rate
+        self.lifecycle_service = OrderLifecycleEventService()
+        self.write_service = ReportWriteService(self)
+        self.rebuild_service = ReportRebuildService(self)
 
     def write_backtest_report(self, result: BacktestResult) -> list[Path]:
-        """写出回测报告，并返回所有报告主产物路径。
-
-        Args:
-            result: 已完成回测的结果对象；其中 ``artifacts`` / ``run_events`` / ``data_quality_events``
-                会被纳入报告契约。
-
-        Returns:
-            仅返回主报告路径列表，不包含独立事件日志路径。
-
-        Raises:
-            ValueError: 当 ``result`` 缺少 ``strategy_id`` 或 ``run_id`` 时抛出。
-
-        Boundary Behavior:
-            - 首次写出的报告文件必须与 ``backtest_runs.report_artifacts_json`` 保持一致；
-            - manifest 中的 ``report_paths`` / ``event_log_path`` 以相对 ``reports_dir`` 的可迁移路径为优先表达；
-            - 若存在 ``run_events``，会额外写出 sidecar 事件日志 JSON，同时完整事件明细仍由数据库字段兜底；
-            - 本方法只负责产物写出，不直接决定数据库 run.status，状态收口由调用方控制。
-        """
-        if not result.strategy_id or not result.run_id:
-            raise ValueError("write_backtest_report 需要有效的 strategy_id 与 run_id")
-        report_name = self.report_name_template.format(strategy_id=result.strategy_id, run_id=result.run_id)
-        primary_path = self.reports_dir / report_name
-        latest_path = self.reports_dir / f"{result.strategy_id}_backtest.json"
-        resolved_report_paths = [primary_path, latest_path]
-        result.artifacts.report_paths = [self._to_manifest_path(path) for path in resolved_report_paths]
-        run_event_summary = self._resolve_run_event_summary(result.run_events, result.artifacts)
-        result.artifacts.run_event_summary = run_event_summary
-        if result.run_events:
-            event_log_path = self.reports_dir / f"{result.strategy_id}_{result.run_id}_events.json"
-            self.writer.write_json(
-                event_log_path,
-                {
-                    "run_id": result.run_id,
-                    "strategy_id": result.strategy_id,
-                    "event_count": len(result.run_events),
-                    "events": result.run_events,
-                },
-            )
-            result.artifacts.event_log_path = self._to_manifest_path(event_log_path)
-        payload = {
-            "strategy_id": result.strategy_id,
-            "run_id": result.run_id,
-            "benchmark_symbol": result.benchmark_symbol,
-            "trade_dates": [item.isoformat() for item in result.trade_dates],
-            "equity_curve": result.equity_curve,
-            "benchmark_curve": result.benchmark_curve,
-            "order_count": result.order_count,
-            "fill_count": result.fill_count,
-            "metrics": result.metrics,
-            "data_lineage": {
-                "dataset_version_id": result.data_lineage.dataset_version_id,
-                "import_run_id": result.data_lineage.import_run_id,
-                "import_run_ids": result.data_lineage.import_run_ids,
-                "data_source": result.data_lineage.data_source,
-                "data_start_date": result.data_lineage.data_start_date,
-                "data_end_date": result.data_lineage.data_end_date,
-                "dataset_digest": result.data_lineage.dataset_digest,
-                "degradation_flags": result.data_lineage.degradation_flags,
-                "warnings": result.data_lineage.warnings,
-            },
-            "data_quality_summary": self._build_data_quality_summary(result.data_quality_events),
-            "run_event_summary": run_event_summary,
-            "artifacts": self._serialize_artifacts(result.artifacts),
-        }
-        self.writer.write_json(primary_path, payload)
-        self.writer.write_json(latest_path, payload)
-        return resolved_report_paths
+        """写出回测报告，并返回所有报告主产物路径。"""
+        return self.write_service.write_backtest_report(result)
 
     def rebuild_backtest_report(self, run_id: str | None = None) -> Path:
-        """基于数据库中的回测结果重建报表。
-
-        Args:
-            run_id: 指定回测运行 ID；为空时重建最近一次可重建运行。
-
-        Returns:
-            主报告路径。
-
-        Raises:
-            RuntimeError: 当缺少重建必需仓储依赖时抛出。
-            ValueError: 当数据库中不存在目标运行或该运行不可重建时抛出。
-
-        Boundary Behavior:
-            - 优先使用 ``run_manifest_json`` 还原 manifest；
-            - 若旧运行尚未携带该字段，则回退到历史列与配置快照；
-            - benchmark 曲线重建必须优先使用 manifest 中的 ``benchmark_initial_value``，
-              若缺失再回退到配置快照中的 ``backtest.initial_cash``；
-            - ``ENGINE_COMPLETED`` / ``ARTIFACT_EXPORT_FAILED`` 运行会在重建成功后提升为 ``COMPLETED``。
-        """
-        if self.run_repository is None or self.account_repository is None or self.order_repository is None:
-            raise RuntimeError("ReportService 未注入重建报表所需的 repository")
-        rebuildable_statuses = [
-            BacktestRunStatus.COMPLETED,
-            BacktestRunStatus.ENGINE_COMPLETED,
-            BacktestRunStatus.ARTIFACT_EXPORT_FAILED,
-        ]
-        run = (
-            self.run_repository.get_run(run_id)
-            if run_id is not None
-            else self.run_repository.get_latest_run_by_statuses(rebuildable_statuses)
-        )
-        if run is None:
-            if run_id is None:
-                raise ValueError("数据库中不存在可重建的回测运行")
-            raise ValueError(f"找不到指定 run_id 的回测运行: {run_id}")
-        if not run.status.rebuildable:
-            raise ValueError(f"run_id={run.run_id} 当前状态={run.status.value}，不可重建报告")
-        trade_dates, equity_curve = self.account_repository.load_equity_curve(run.run_id)
-        config_snapshot = json.loads(run.config_snapshot_json)
-        benchmark_symbol = config_snapshot.get("backtest", {}).get("benchmark_symbol")
-        manifest = self._load_run_manifest(run)
-        benchmark_initial_value = manifest.benchmark_initial_value
-        if benchmark_initial_value is None:
-            benchmark_initial_value = self._coerce_float(config_snapshot.get("backtest", {}).get("initial_cash"))
-        benchmark_curve = self._rebuild_benchmark_curve(trade_dates, benchmark_symbol, benchmark_initial_value)
-        metrics_payload = self._build_metrics_payload(equity_curve, benchmark_curve)
-        quality_events = self._load_quality_events(run.import_run_id)
-        run_events = self._load_run_events(run, manifest)
-        result = BacktestResult(
-            strategy_id=run.strategy_id,
-            run_id=run.run_id,
-            benchmark_symbol=benchmark_symbol,
-            trade_dates=trade_dates,
-            equity_curve=equity_curve,
-            benchmark_curve=benchmark_curve,
-            order_count=self.order_repository.count_orders(run.run_id),
-            fill_count=self.order_repository.count_fills(run.run_id),
-            metrics=metrics_payload,
-            data_lineage=DataLineage(
-                dataset_version_id=run.dataset_version_id,
-                import_run_id=run.import_run_id,
-                import_run_ids=json.loads(run.import_run_ids_json or "[]"),
-                data_source=run.data_source or "database_snapshot",
-                data_start_date=run.data_start_date,
-                data_end_date=run.data_end_date,
-                dataset_digest=run.dataset_digest,
-                degradation_flags=json.loads(run.degradation_flags_json or "[]"),
-                warnings=json.loads(run.warnings_json or "[]"),
-            ),
-            artifacts=manifest,
-            run_events=run_events,
-            data_quality_events=quality_events,
-        )
-        result.artifacts.artifact_status = "GENERATED"
-        result.artifacts.artifact_errors = []
-        result.artifacts.artifact_completed_at = now_iso()
-        try:
-            report_paths = self.write_backtest_report(result)
-        except Exception as exc:
-            result.artifacts.artifact_status = "FAILED"
-            result.artifacts.artifact_errors = [str(exc)]
-            result.artifacts.artifact_completed_at = now_iso()
-            self.run_repository.finish_run(
-                run.run_id,
-                BacktestRunStatus.ARTIFACT_EXPORT_FAILED,
-                error_message=str(exc),
-                run_manifest=result.artifacts,
-                run_events=result.run_events,
-                overwrite_error_message=True,
-            )
-            raise
-        result.report_path = str(report_paths[0])
-        self.run_repository.finish_run(
-            run.run_id,
-            BacktestRunStatus.COMPLETED,
-            error_message=None,
-            report_path=str(report_paths[0]),
-            report_artifacts=result.artifacts.report_paths,
-            run_manifest=result.artifacts,
-            run_events=result.run_events,
-            overwrite_error_message=True,
-        )
-        return report_paths[0]
+        """基于数据库中的回测结果重建报表。"""
+        return self.rebuild_service.rebuild_backtest_report(run_id)
 
     def _build_metrics_payload(self, equity_curve: list[float], benchmark_curve: list[float]) -> dict[str, float]:
         if len(equity_curve) >= 2:
@@ -293,28 +134,40 @@ class ReportService:
                 payload = parsed
         if not payload:
             payload = {
+                "schema_version": 6,
                 "entrypoint": run.entrypoint,
                 "strategy_version": run.strategy_version,
                 "runtime_mode": run.runtime_mode,
                 "report_paths": json.loads(run.report_artifacts_json or "[]"),
             }
+        payload.setdefault("schema_version", 6)
+        payload.setdefault("entrypoint", run.entrypoint)
+        payload.setdefault("strategy_version", run.strategy_version)
+        payload.setdefault("runtime_mode", run.runtime_mode)
+        payload.setdefault("report_paths", json.loads(run.report_artifacts_json or "[]"))
+        payload.setdefault("artifact_status", "GENERATED" if run.status == BacktestRunStatus.COMPLETED else "PENDING")
+        payload.setdefault("artifact_errors", [] if run.error_message is None else [run.error_message])
+        payload.setdefault("engine_completed_at", run.finished_at)
+        payload.setdefault("artifact_completed_at", run.finished_at)
+        contract = parse_run_manifest_contract(payload)
         return RunArtifacts(
-            schema_version=int(payload.get("schema_version", 1) or 1),
-            entrypoint=payload.get("entrypoint") or run.entrypoint,
-            strategy_version=payload.get("strategy_version") or run.strategy_version,
-            runtime_mode=payload.get("runtime_mode") or run.runtime_mode,
-            benchmark_initial_value=self._coerce_float(payload.get("benchmark_initial_value")),
-            report_paths=list(payload.get("report_paths") or json.loads(run.report_artifacts_json or "[]")),
-            event_log_path=payload.get("event_log_path"),
-            run_event_summary=dict(payload.get("run_event_summary") or {}),
-            artifact_status=str(payload.get("artifact_status") or ("GENERATED" if run.status == BacktestRunStatus.COMPLETED else "PENDING")),
-            artifact_errors=list(payload.get("artifact_errors") or ([] if run.error_message is None else [run.error_message])),
-            engine_completed_at=payload.get("engine_completed_at") or run.finished_at,
-            artifact_completed_at=payload.get("artifact_completed_at") or run.finished_at,
-            component_manifest=dict(payload.get("component_manifest") or {}),
-            promotion_package=dict(payload.get("promotion_package") or {}),
-            signal_source_run_id=payload.get("signal_source_run_id"),
-            signal_source_artifact_type=payload.get("signal_source_artifact_type"),
+            schema_version=contract.schema_version,
+            entrypoint=contract.entrypoint,
+            strategy_version=contract.strategy_version,
+            runtime_mode=contract.runtime_mode,
+            benchmark_initial_value=self._coerce_float(contract.benchmark_initial_value),
+            report_paths=list(contract.report_paths),
+            report_artifacts=[item.model_dump(mode="python") for item in contract.report_artifacts],
+            event_log_path=contract.event_log_path,
+            run_event_summary=contract.run_event_summary.model_dump(mode="python"),
+            artifact_status=str(contract.artifact_status),
+            artifact_errors=list(contract.artifact_errors),
+            engine_completed_at=contract.engine_completed_at,
+            artifact_completed_at=contract.artifact_completed_at,
+            component_manifest=contract.component_manifest.model_dump(mode="python"),
+            promotion_package=(contract.promotion_package.model_dump(mode="python") if contract.promotion_package is not None else {}),
+            signal_source_run_id=contract.signal_source_run_id,
+            signal_source_artifact_type=contract.signal_source_artifact_type,
         )
 
     def _load_quality_events(self, import_run_id: str | None) -> list[dict[str, Any]]:
@@ -437,24 +290,28 @@ class ReportService:
 
     @staticmethod
     def _serialize_artifacts(artifacts: RunArtifacts) -> dict[str, Any]:
-        return {
-            "schema_version": artifacts.schema_version,
-            "entrypoint": artifacts.entrypoint,
-            "strategy_version": artifacts.strategy_version,
-            "runtime_mode": artifacts.runtime_mode,
-            "benchmark_initial_value": artifacts.benchmark_initial_value,
-            "report_paths": artifacts.report_paths,
-            "event_log_path": artifacts.event_log_path,
-            "run_event_summary": artifacts.run_event_summary,
-            "artifact_status": artifacts.artifact_status,
-            "artifact_errors": artifacts.artifact_errors,
-            "engine_completed_at": artifacts.engine_completed_at,
-            "artifact_completed_at": artifacts.artifact_completed_at,
-            "component_manifest": artifacts.component_manifest,
-            "promotion_package": artifacts.promotion_package,
-            "signal_source_run_id": artifacts.signal_source_run_id,
-            "signal_source_artifact_type": artifacts.signal_source_artifact_type,
-        }
+        contract = parse_run_manifest_contract(
+            {
+                "schema_version": int(artifacts.schema_version or 6),
+                "entrypoint": artifacts.entrypoint,
+                "strategy_version": artifacts.strategy_version,
+                "runtime_mode": artifacts.runtime_mode,
+                "benchmark_initial_value": artifacts.benchmark_initial_value,
+                "report_paths": list(artifacts.report_paths),
+                "report_artifacts": list(artifacts.report_artifacts),
+                "event_log_path": artifacts.event_log_path,
+                "run_event_summary": dict(artifacts.run_event_summary),
+                "artifact_status": artifacts.artifact_status,
+                "artifact_errors": list(artifacts.artifact_errors),
+                "engine_completed_at": artifacts.engine_completed_at,
+                "artifact_completed_at": artifacts.artifact_completed_at,
+                "component_manifest": dict(artifacts.component_manifest),
+                "promotion_package": dict(artifacts.promotion_package) or None,
+                "signal_source_run_id": artifacts.signal_source_run_id,
+                "signal_source_artifact_type": artifacts.signal_source_artifact_type,
+            }
+        )
+        return contract.model_dump(mode="python")
 
     @staticmethod
     def _coerce_float(value: Any) -> float | None:

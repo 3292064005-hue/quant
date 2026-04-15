@@ -24,6 +24,7 @@ def test_backtest_can_consume_persisted_research_signal_snapshot(temp_config_dir
             "3",
             "--top-n",
             "2",
+            "--record",
         ]
     )
     assert exit_code == 0
@@ -77,7 +78,7 @@ def test_ui_snapshot_exposes_execution_risk_and_replay_queries(temp_config_dir: 
     assert "risk_audit_logs" in snapshot["latest_risk_alerts"]
     assert snapshot["latest_report_replay_summary"] is not None
     assert "lineage_graph" in snapshot["latest_report_replay_summary"]
-    assert snapshot["ui_schema_version"] == 1
+    assert snapshot["ui_schema_version"] == 2
     assert snapshot["ui_runtime_checks"][0]["check"] == "data_provider"
 
 

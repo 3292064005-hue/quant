@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from a_share_quant.core.broker_acceptance import readiness_level_name
+
 _ALLOWED_DATA_PROVIDERS = {"csv", "tushare", "akshare"}
 _ALLOWED_MISSING_PRICE_POLICIES = {"last_known", "avg_cost", "reject"}
 _ALLOWED_DATA_ACCESS_MODES = {"preload", "stream"}
@@ -18,6 +20,7 @@ _ALLOWED_BROKER_PROVIDERS = {"mock", "qmt", "ptrade"}
 _ALLOWED_BROKER_EVENT_SOURCE_MODES = {"auto", "poll", "subscribe"}
 _ALLOWED_PATH_RESOLUTION_MODES = {"config_dir", "cwd"}
 _ALLOWED_RUNTIME_MODES = {"research_backtest", "paper_trade", "live_trade"}
+_ALLOWED_DISTRIBUTION_PROFILES = {"core", "workstation", "production"}
 _ALLOWED_CALENDAR_POLICIES = {"demo", "derive", "strict"}
 
 
@@ -37,6 +40,7 @@ class AppSection(BaseModel):
     logs_dir: str = "runtime/logs"
     path_resolution_mode: str = "config_dir"
     runtime_mode: str = "research_backtest"
+    distribution_profile: str = "workstation"
 
     @field_validator("path_resolution_mode")
     @classmethod
@@ -47,6 +51,11 @@ class AppSection(BaseModel):
     @classmethod
     def _validate_runtime_mode(cls, value: str) -> str:
         return _normalize_lower(value, field_name="app.runtime_mode", allowed=_ALLOWED_RUNTIME_MODES)
+
+    @field_validator("distribution_profile")
+    @classmethod
+    def _validate_distribution_profile(cls, value: str) -> str:
+        return _normalize_lower(value, field_name="app.distribution_profile", allowed=_ALLOWED_DISTRIBUTION_PROFILES)
 
 
 class DataSection(BaseModel):
@@ -210,6 +219,9 @@ class BrokerSection(BaseModel):
     strict_contract_mapping: bool = True
     client_factory: str | None = None
     event_source_mode: str = "auto"
+    acceptance_manifest_path: str | None = None
+    execute_acceptance_suite: bool = False
+    required_readiness_level: str | None = None
 
     @field_validator("provider")
     @classmethod
@@ -233,6 +245,13 @@ class BrokerSection(BaseModel):
             normalized.append(candidate)
             seen.add(candidate)
         return normalized
+
+    @field_validator("required_readiness_level")
+    @classmethod
+    def _validate_required_readiness_level(cls, value: str | None) -> str | None:
+        if value is None or not str(value).strip():
+            return None
+        return readiness_level_name(value)
 
 
 class OperatorSection(BaseModel):
@@ -282,6 +301,7 @@ class ResearchSection(BaseModel):
     cache_schema_version: str = "v3"
     dataset_scope_cache_invalidation: bool = True
     max_cached_entries: int = 500
+    record_query_runs: bool = False
 
 
 class PluginsSection(BaseModel):
@@ -318,3 +338,34 @@ class AppConfig(BaseModel):
     operator: OperatorSection = Field(default_factory=OperatorSection)
     research: ResearchSection = Field(default_factory=ResearchSection)
     plugins: PluginsSection = Field(default_factory=PluginsSection)
+
+    @model_validator(mode="after")
+    def _validate_distribution_profile_contract(self) -> "AppConfig":
+        profile = self.app.distribution_profile
+        if profile == "production":
+            violations: list[str] = []
+            if self.app.runtime_mode not in {"paper_trade", "live_trade"}:
+                violations.append("production profile 仅支持 paper_trade/live_trade")
+            if self.broker.provider == "mock":
+                violations.append("production profile 禁止 broker.provider=mock")
+            if self.data.calendar_policy != "strict":
+                violations.append("production profile 要求 data.calendar_policy=strict")
+            if self.data.allow_degraded_data:
+                violations.append("production profile 要求 data.allow_degraded_data=false")
+            if not self.data.fail_on_degraded_data:
+                violations.append("production profile 要求 data.fail_on_degraded_data=true")
+            if not self.broker.strict_contract_mapping:
+                violations.append("production profile 要求 broker.strict_contract_mapping=true")
+            if not self.operator.require_approval:
+                violations.append("production profile 要求 operator.require_approval=true")
+            if not self.broker.acceptance_manifest_path:
+                violations.append("production profile 要求 broker.acceptance_manifest_path 指向已验证的 acceptance manifest")
+            if violations:
+                raise ValueError("；".join(violations))
+        return self
+
+    def distribution_capabilities(self) -> dict[str, Any]:
+        from a_share_quant.app.distribution_profile_contract import get_distribution_profile_spec
+
+        spec = get_distribution_profile_spec(self.app.distribution_profile)
+        return dict(spec.capabilities)

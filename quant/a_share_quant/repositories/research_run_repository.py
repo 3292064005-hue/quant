@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from a_share_quant.contracts.versioned_contracts import parse_signal_snapshot_payload
 from a_share_quant.core.utils import json_dumps, new_id, now_iso
 from a_share_quant.storage.sqlite_store import SQLiteStore
 
@@ -349,6 +350,8 @@ class ResearchRunRepository:
                 }
             )
         payload = dict(result)
+        payload["artifact_schema_version"] = int(payload.get("artifact_schema_version") or 1)
+        payload["artifact_type"] = "signal_snapshot"
         payload["selected_symbols"] = normalized_symbols
         promotion_package = payload.get("promotion_package")
         if not isinstance(promotion_package, dict):
@@ -359,7 +362,14 @@ class ResearchRunRepository:
         payload["dataset_digest"] = row.get("dataset_digest")
         payload["research_session_id"] = row.get("research_session_id")
         payload["root_research_run_id"] = row.get("root_research_run_id")
-        return payload
+        dataset_summary = dict(payload.get("dataset_summary") or {})
+        dataset_summary.setdefault("dataset_version_id", row.get("dataset_version_id"))
+        dataset_summary.setdefault("dataset_digest", row.get("dataset_digest"))
+        payload["dataset_summary"] = dataset_summary
+        try:
+            return parse_signal_snapshot_payload(payload).model_dump(mode="python")
+        except Exception as exc:
+            raise ValueError(f"research run {row['research_run_id']} 的 signal_snapshot 合同非法: {exc}") from exc
 
     @staticmethod
     def _normalize(row: dict) -> dict:

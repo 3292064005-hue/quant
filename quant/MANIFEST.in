@@ -1,7 +1,12 @@
+include setup.py
 include README.md
 include LICENSE
 include NOTICE_THIRD_PARTY.md
 include requirements.txt
+include requirements-dev.txt
+include requirements-production.txt
+include requirements-workstation.txt
+include requirements-core.txt
 include ruff.toml
 include mypy.ini
 recursive-include docs *.md

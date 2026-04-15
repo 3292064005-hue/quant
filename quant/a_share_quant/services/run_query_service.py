@@ -6,6 +6,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from a_share_quant.adapters.broker.base import LiveBrokerPort
+from a_share_quant.contracts.versioned_contracts import parse_run_manifest_contract
 from a_share_quant.domain.models import BacktestRun, DataImportRun
 from a_share_quant.repositories.audit_repository import AuditRepository
 from a_share_quant.repositories.account_repository import AccountRepository
@@ -15,6 +16,9 @@ from a_share_quant.repositories.data_import_repository import DataImportReposito
 from a_share_quant.repositories.execution_session_repository import ExecutionSessionRepository
 from a_share_quant.repositories.order_repository import OrderRepository
 from a_share_quant.repositories.research_run_repository import ResearchRunRepository
+from a_share_quant.execution.order_lifecycle_service import OrderLifecycleEventService
+from a_share_quant.services.run_query_operator_snapshot_service import OperatorSnapshotService
+from a_share_quant.services.run_query_snapshot_service import LatestRunSnapshotService
 from a_share_quant.services.ui_read_models import build_recent_research_run_projection
 
 
@@ -50,29 +54,12 @@ class RunQueryService:
             self.runtime_event_repository = getattr(execution_session_repository, "runtime_event_repository")
         else:
             self.runtime_event_repository = runtime_event_repository
+        self.snapshot_service = LatestRunSnapshotService(self)
+        self.operator_snapshot_service = OperatorSnapshotService(self)
 
     def build_latest_snapshot(self) -> dict[str, Any]:
         """构建最近一次导入/研究/回测的统一只读快照。"""
-        latest_import = self.data_import_repository.get_latest_run()
-        latest_run = self.backtest_run_repository.get_latest_run()
-        latest_run_import_run_id = latest_run.import_run_id if latest_run is not None else None
-        recent_research_runs = self.research_run_repository.list_recent(limit=10)
-        payload: dict[str, Any] = {
-            "latest_import_run": self._serialize_import_run(latest_import) if latest_import is not None else None,
-            "latest_import_quality_events": self._load_quality_events(latest_import.import_run_id) if latest_import is not None else [],
-            "latest_backtest_run": self._serialize_backtest_run(latest_run) if latest_run is not None else None,
-            "latest_execution_summary": self._build_execution_summary(latest_run.run_id) if latest_run is not None else self._empty_execution_summary(),
-            "latest_risk_alerts": self._build_risk_summary(latest_run.run_id, latest_run_import_run_id) if latest_run is not None else self._empty_risk_summary(latest_import.import_run_id if latest_import else None),
-            "recent_research_runs": recent_research_runs,
-            "recent_research_run_summaries": build_recent_research_run_projection(recent_research_runs),
-            "latest_operator_session": self._build_latest_operator_session(),
-            "recent_runtime_events": self.runtime_event_repository.list_recent(limit=50) if self.runtime_event_repository is not None else [],
-        }
-        if latest_run is not None:
-            payload["latest_report_replay_summary"] = self._build_report_replay_summary(latest_run)
-        else:
-            payload["latest_report_replay_summary"] = None
-        return payload
+        return self.snapshot_service.build_latest_snapshot()
 
     def build_operator_snapshot(
         self,
@@ -88,61 +75,17 @@ class RunQueryService:
         capability_summary: dict[str, Any],
     ) -> dict[str, Any]:
         """构建统一 operator 只读快照。"""
-        latest_runs = self.build_latest_snapshot()
-        session_account_id = None
-        latest_session = latest_runs.get("latest_operator_session") or {}
-        if isinstance(latest_session, dict):
-            session_account_id = latest_session.get("account_id")
-        configured_accounts: list[str | None] = []
-        explicit_accounts: list[str] = []
-        for candidate in [default_account_id, session_account_id, *(allowed_account_ids or [])]:
-            normalized = str(candidate).strip() if candidate is not None else None
-            if not normalized:
-                continue
-            if normalized not in explicit_accounts:
-                explicit_accounts.append(normalized)
-        if explicit_accounts:
-            configured_accounts.extend(explicit_accounts)
-        else:
-            configured_accounts.append(None)
-        account_views: list[dict[str, Any]] = []
-        for scoped_account_id in configured_accounts:
-            persisted_account = self.account_repository.load_latest_operator_account_snapshot(account_id=scoped_account_id) if self.account_repository is not None else None
-            persisted_positions = self.account_repository.load_latest_operator_position_snapshots(account_id=scoped_account_id, capture_id=str(persisted_account["capture_id"]) if persisted_account is not None else None) if self.account_repository is not None else []
-            account_snapshot = self._get_account_snapshot(broker, scoped_account_id)
-            positions = self._get_position_snapshots(broker, scoped_account_id)
-            orders = self._query_orders_scoped(broker, scoped_account_id)
-            fills = self._query_trades_scoped(broker, scoped_account_id)
-            account_views.append(
-                {
-                    "account_id": scoped_account_id,
-                    "account": asdict(account_snapshot),
-                    "positions": [asdict(item) for item in positions],
-                    "orders": [asdict(item) for item in orders],
-                    "fills": [asdict(item) for item in fills],
-                    "persisted_account": persisted_account,
-                    "persisted_positions": persisted_positions,
-                }
-            )
-        primary_view = next((item for item in account_views if item["account_id"] == default_account_id), account_views[0] if account_views else None)
-        return {
-            "runtime_mode": runtime_mode,
-            "broker_provider": broker_provider,
-            "default_account_id": default_account_id,
-            "allowed_account_ids": allowed_account_ids,
-            "event_source_mode": event_source_mode,
-            "supervisor": supervisor_config,
-            "runtime_checks": runtime_checks,
-            "capability_summary": capability_summary,
-            "account": primary_view.get("account") if primary_view else None,
-            "positions": primary_view.get("positions") if primary_view else [],
-            "orders": primary_view.get("orders") if primary_view else [],
-            "fills": primary_view.get("fills") if primary_view else [],
-            "account_views": account_views,
-            "latest_runs": latest_runs,
-            "recent_runtime_events": self.runtime_event_repository.list_recent(source_domain="operator", limit=50) if self.runtime_event_repository is not None else [],
-        }
-
+        return self.operator_snapshot_service.build_operator_snapshot(
+            broker=broker,
+            runtime_mode=runtime_mode,
+            broker_provider=broker_provider,
+            default_account_id=default_account_id,
+            allowed_account_ids=allowed_account_ids,
+            event_source_mode=event_source_mode,
+            supervisor_config=supervisor_config,
+            runtime_checks=runtime_checks,
+            capability_summary=capability_summary,
+        )
 
     @staticmethod
     def _get_account_snapshot(broker: LiveBrokerPort, account_id: str | None):
@@ -196,7 +139,7 @@ class RunQueryService:
             "dataset_version_id": run.dataset_version_id,
             "import_run_id": run.import_run_id,
             "dataset_digest": run.dataset_digest,
-            "report_artifacts": json.loads(run.report_artifacts_json or "[]"),
+            "report_artifacts": manifest.get("report_artifacts") or json.loads(run.report_artifacts_json or "[]"),
             "run_manifest": manifest,
         }
 
@@ -310,12 +253,12 @@ class RunQueryService:
             "causal_research_runs": causal_research_runs,
             "related_research_runs": related_research_runs,
             "backtest_run_id": run.run_id,
-            "report_artifacts": json.loads(run.report_artifacts_json or "[]"),
+            "report_artifacts": manifest.get("report_artifacts") or json.loads(run.report_artifacts_json or "[]"),
         }
         return {
             "run_id": run.run_id,
             "report_path": run.report_path,
-            "report_artifacts": json.loads(run.report_artifacts_json or "[]"),
+            "report_artifacts": manifest.get("report_artifacts") or json.loads(run.report_artifacts_json or "[]"),
             "run_event_summary": manifest.get("run_event_summary", {}),
             "event_log_path": manifest.get("event_log_path"),
             "artifact_status": manifest.get("artifact_status"),
@@ -353,7 +296,24 @@ class RunQueryService:
             payload = asdict(payload)
         if not isinstance(payload, dict):
             payload = {}
-        return payload
+        if not payload:
+            payload = {
+                "schema_version": 6,
+                "entrypoint": run.entrypoint,
+                "strategy_version": run.strategy_version,
+                "runtime_mode": run.runtime_mode,
+                "report_paths": json.loads(run.report_artifacts_json or "[]"),
+            }
+        payload.setdefault("schema_version", 6)
+        payload.setdefault("entrypoint", run.entrypoint)
+        payload.setdefault("strategy_version", run.strategy_version)
+        payload.setdefault("runtime_mode", run.runtime_mode)
+        payload.setdefault("report_paths", json.loads(run.report_artifacts_json or "[]"))
+        payload.setdefault("report_artifacts", [
+            {"role": "primary" if index == 0 else f"report_copy_{index}", "path": path, "kind": "report", "format": "json", "primary": index == 0}
+            for index, path in enumerate(payload.get("report_paths") or [])
+        ])
+        return parse_run_manifest_contract(payload).model_dump(mode="python")
 
     def _build_latest_operator_session(self) -> dict[str, Any] | None:
         if self.execution_session_repository is None:
@@ -361,6 +321,11 @@ class RunQueryService:
         session = self.execution_session_repository.get_latest()
         if session is None:
             return None
+        lifecycle_service = OrderLifecycleEventService()
+        session_events = self.execution_session_repository.list_events(session.session_id, limit=200)
+        normalized_events = [lifecycle_service.normalize_trade_command_event(item) for item in session_events]
+        lifecycle_snapshot = lifecycle_service.replay_lifecycle_events(session_events)
+        observability = self._build_operator_observability_summary(session, runtime_events=normalized_events)
         return {
             "session_id": session.session_id,
             "runtime_mode": session.runtime_mode,
@@ -385,16 +350,53 @@ class RunQueryService:
             "last_supervised_at": session.last_supervised_at,
             "recent_orders": self.order_repository.list_orders(execution_session_id=session.session_id, limit=20),
             "recent_fills": self.order_repository.list_fills(execution_session_id=session.session_id, limit=20),
-            "events": [
-                {
-                    "event_id": item.event_id,
-                    "event_type": item.event_type,
-                    "level": item.level,
-                    "payload": item.payload,
-                    "created_at": item.created_at,
-                }
-                for item in self.execution_session_repository.list_events(session.session_id, limit=50)
-            ],
+            "events": normalized_events,
+            "lifecycle_snapshot": asdict(lifecycle_snapshot) if lifecycle_snapshot is not None else None,
+            "observability": observability,
+        }
+
+    def _build_operator_observability_summary(self, session: Any, *, runtime_events: list[dict[str, Any]]) -> dict[str, Any]:
+        """汇总 operator 会话降级、supervisor 与 reconcile 可观测性指标。"""
+        normalized_events = []
+        lifecycle_service = OrderLifecycleEventService()
+        for event in runtime_events:
+            if "payload" in event and "event_type" in event:
+                normalized_events.append(lifecycle_service.normalize_runtime_event(event))
+        event_type_counts: dict[str, int] = {}
+        level_counts: dict[str, int] = {}
+        degraded_events: list[dict[str, Any]] = []
+        supervisor_event_count = 0
+        reconcile_event_count = 0
+        audit_write_failures = 0
+        recovery_retry_failures = 0
+        for event in normalized_events:
+            event_type = str(event.get("event_type") or "UNKNOWN")
+            level = str(event.get("level") or "INFO")
+            event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+            level_counts[level] = level_counts.get(level, 0) + 1
+            if event_type.startswith("SUPERVISOR_"):
+                supervisor_event_count += 1
+            if event_type.startswith("RECOVERY_") or event_type in {"SESSION_SYNC_COMPLETED", "RECOVERY_REQUIRED"}:
+                reconcile_event_count += 1
+            is_degraded = level in {"ERROR", "WARN"} or event_type.endswith("FAILED") or event_type in {"AUDIT_WRITE_FAILED", "SUPERVISOR_ERROR", "RECOVERY_RETRY_FAILED"}
+            if event_type == "AUDIT_WRITE_FAILED":
+                audit_write_failures += 1
+            if event_type == "RECOVERY_RETRY_FAILED":
+                recovery_retry_failures += 1
+            if is_degraded:
+                degraded_events.append({"event_id": event.get("event_id"), "event_type": event_type, "level": level, "created_at": event.get("created_at") or event.get("occurred_at"), "payload": dict(event.get("payload") or {})})
+        degraded_events.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return {
+            "session_id": getattr(session, "session_id", None) if session is not None and not isinstance(session, dict) else (session or {}).get("session_id"),
+            "total_event_count": len(normalized_events),
+            "event_type_counts": event_type_counts,
+            "level_counts": level_counts,
+            "degraded_event_count": len(degraded_events),
+            "audit_write_failure_count": audit_write_failures,
+            "recovery_retry_failure_count": recovery_retry_failures,
+            "supervisor_event_count": supervisor_event_count,
+            "reconcile_event_count": reconcile_event_count,
+            "recent_degraded_events": degraded_events[:10],
         }
 
     @staticmethod

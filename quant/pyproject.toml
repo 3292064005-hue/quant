@@ -35,19 +35,21 @@ include = ["a_share_quant*"]
 
 [tool.setuptools.package-data]
 "a_share_quant" = ["schema.sql"]
-"a_share_quant.resources" = ["configs/*.yaml", "configs/*.json", "configs/broker/*.yaml"]
+"a_share_quant.resources" = ["configs/*.yaml", "configs/*.json", "configs/broker/*.yaml", "configs/broker/*.json"]
+"a_share_quant.sample_data" = ["*.csv"]
 
 [project.scripts]
-a-share-quant = "a_share_quant.cli:main_app"
+a-share-quant = "a_share_quant.cli_research:main_app"
 a-share-quant-check-runtime = "a_share_quant.cli:main_check_runtime"
-a-share-quant-init-db = "a_share_quant.cli:main_init_db"
-a-share-quant-sync-market-data = "a_share_quant.cli:main_sync_market_data"
-a-share-quant-daily-run = "a_share_quant.cli:main_daily_run"
-a-share-quant-generate-report = "a_share_quant.cli:main_generate_report"
+a-share-quant-init-db = "a_share_quant.cli_data:main_init_db"
+a-share-quant-sync-market-data = "a_share_quant.cli_data:main_sync_market_data"
+a-share-quant-daily-run = "a_share_quant.cli_backtest:main_daily_run"
+a-share-quant-generate-report = "a_share_quant.cli_report:main_generate_report"
 a-share-quant-launch-ui = "a_share_quant.cli:main_launch_ui"
-a-share-quant-research = "a_share_quant.cli:main_research"
-a-share-quant-operator-snapshot = "a_share_quant.cli:main_operator_snapshot"
-a-share-quant-operator-submit-order = "a_share_quant.cli:main_operator_submit_order"
-a-share-quant-operator-reconcile-session = "a_share_quant.cli:main_operator_reconcile_session"
-a-share-quant-operator-sync-session = "a_share_quant.cli:main_operator_sync_session"
-a-share-quant-operator-run-supervisor = "a_share_quant.cli:main_operator_run_supervisor"
+a-share-quant-research = "a_share_quant.cli_research:main_research"
+a-share-quant-operator-snapshot = "a_share_quant.cli_operator:main_operator_snapshot"
+a-share-quant-operator-submit-order = "a_share_quant.cli_operator:main_operator_submit_order"
+a-share-quant-operator-submit-signal = "a_share_quant.cli_operator:main_operator_submit_signal"
+a-share-quant-operator-reconcile-session = "a_share_quant.cli_operator:main_operator_reconcile_session"
+a-share-quant-operator-sync-session = "a_share_quant.cli_operator:main_operator_sync_session"
+a-share-quant-operator-run-supervisor = "a_share_quant.cli_operator:main_operator_run_supervisor"

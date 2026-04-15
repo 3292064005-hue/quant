@@ -8,7 +8,7 @@ import yaml
 
 from a_share_quant.adapters.broker.base import BrokerBase, LiveBrokerPort
 from a_share_quant.app.bootstrap import bootstrap, bootstrap_data_context
-from a_share_quant.app.context import AppContext
+from a_share_quant.app.context import AppContext, OperatorRuntimeContext, PersistenceContext, RegistryContext
 from a_share_quant.cli import _load_ui_operations_snapshot, main_research
 from a_share_quant.plugins import AppPlugin, PluginDescriptor
 from a_share_quant.plugins.plugin_manager import PluginLifecycleHookError, PluginManager
@@ -129,12 +129,37 @@ def test_ui_snapshot_exposes_component_and_plugin_details(tmp_path: Path) -> Non
     assert "available_workflow_details" in snapshot
     assert "installed_plugin_details" in snapshot
     assert "registered_components" in snapshot
-    assert snapshot["ui_schema_version"] == 1
+    assert "ui_plugin_lifecycle_events" in snapshot
+    assert snapshot["ui_schema_version"] == 2
     assert any(item["name"] == "provider.dataset" for item in snapshot["available_provider_details"])
     assert any(item["name"] == "workflow.research" for item in snapshot["available_workflow_details"])
     assert any(item["name"] == "provider.dataset" for item in snapshot["ui_available_provider_details"])
     assert any(item["name"] == "workflow.research" for item in snapshot["ui_available_workflow_details"])
     assert any(item["name"] == "builtin.dataset" for item in snapshot["installed_plugin_details"])
+    assert "ui_latest_import_run" in snapshot
+    assert "ui_latest_import_quality_events" in snapshot
+    assert "ui_latest_backtest_run" in snapshot
+    assert "ui_latest_execution_summary" in snapshot
+    assert "ui_latest_risk_alerts" in snapshot
+    assert "ui_latest_report_replay_summary" in snapshot
+
+
+def test_ui_panels_only_consume_ui_projection_keys() -> None:
+    panel_root = Path("a_share_quant/ui/panels")
+    violations: list[str] = []
+    for panel in sorted(panel_root.glob("*.py")):
+        text = panel.read_text(encoding="utf-8")
+        for forbidden in [
+            'operations_snapshot.get("latest_import_run")',
+            'operations_snapshot.get("latest_import_quality_events")',
+            'operations_snapshot.get("latest_backtest_run")',
+            'operations_snapshot.get("latest_execution_summary")',
+            'operations_snapshot.get("latest_risk_alerts")',
+            'operations_snapshot.get("latest_report_replay_summary")',
+        ]:
+            if forbidden in text:
+                violations.append(f"{panel.name}:{forbidden}")
+    assert not violations, f"UI panel 仍直接依赖 raw snapshot: {violations}"
 
 
 def test_after_hook_failures_are_recorded_and_later_plugins_still_run() -> None:
@@ -151,7 +176,7 @@ def test_after_hook_failures_are_recorded_and_later_plugins_still_run() -> None:
         raise AssertionError("应抛出 PluginLifecycleHookError")
 
     events = manager.lifecycle_events()
-    assert any(item["event"] == "after_workflow_run_error" and item["plugin_name"] == "test.fail_after" for item in events)
+    assert any(item["event"] == "after_workflow_run_error" and item["plugin_name"] == "test.fail_after" and item.get("created_at") and isinstance(item.get("payload"), dict) for item in events)
     assert any(item["event"] == "after_workflow_run" and item["plugin_name"] == "test.tracking" for item in events)
     assert sink == ["after:workflow.research"]
 
@@ -170,7 +195,7 @@ def test_shutdown_failures_are_recorded_and_following_plugins_still_close() -> N
         raise AssertionError("应抛出 PluginLifecycleHookError")
 
     events = manager.lifecycle_events()
-    assert any(item["event"] == "shutdown_error" and item["plugin_name"] == "test.fail_shutdown" for item in events)
+    assert any(item["event"] == "shutdown_error" and item["plugin_name"] == "test.fail_shutdown" and item.get("created_at") and isinstance(item.get("payload"), dict) for item in events)
     assert any(item["event"] == "shutdown" and item["plugin_name"] == "test.tracking" for item in events)
     assert sink == ["plugin_shutdown"]
 
@@ -181,18 +206,20 @@ def test_app_context_close_uses_plugin_then_broker_then_store_order() -> None:
     manager.register(_TrackingPlugin(sink))
     context = AppContext(
         config=None,  # type: ignore[arg-type]
-        market_repository=None,  # type: ignore[arg-type]
-        order_repository=None,  # type: ignore[arg-type]
-        account_repository=None,  # type: ignore[arg-type]
-        audit_repository=None,  # type: ignore[arg-type]
-        strategy_repository=None,  # type: ignore[arg-type]
-        backtest_run_repository=None,  # type: ignore[arg-type]
-        data_import_repository=None,  # type: ignore[arg-type]
-        dataset_version_repository=None,  # type: ignore[arg-type]
-        research_run_repository=None,  # type: ignore[arg-type]
-        store=cast(SQLiteStore, _DummyStore(sink)),
-        plugin_manager=manager,
-        broker=cast(BrokerBase | LiveBrokerPort, _DummyBroker(sink)),
+        persistence=PersistenceContext(
+            market_repository=None,  # type: ignore[arg-type]
+            order_repository=None,  # type: ignore[arg-type]
+            account_repository=None,  # type: ignore[arg-type]
+            audit_repository=None,  # type: ignore[arg-type]
+            strategy_repository=None,  # type: ignore[arg-type]
+            backtest_run_repository=None,  # type: ignore[arg-type]
+            data_import_repository=None,  # type: ignore[arg-type]
+            dataset_version_repository=None,  # type: ignore[arg-type]
+            research_run_repository=None,  # type: ignore[arg-type]
+            store=cast(SQLiteStore, _DummyStore(sink)),
+        ),
+        registries=RegistryContext(plugin_manager=manager),
+        operator_runtime=OperatorRuntimeContext(broker=cast(BrokerBase | LiveBrokerPort, _DummyBroker(sink))),
     )
 
     context.close()

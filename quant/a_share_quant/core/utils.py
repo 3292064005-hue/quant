@@ -4,16 +4,34 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import threading
 import uuid
 from dataclasses import asdict, is_dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 
+_NOW_ISO_LOCK = threading.Lock()
+_LAST_NOW_ISO: datetime | None = None
+
+
 def now_iso() -> str:
-    """返回当前 UTC ISO 时间字符串。"""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    """返回单调递增的 UTC ISO 时间字符串。
+
+    Boundary Behavior:
+        - 精度保留到微秒，避免 runtime event 在同秒内发生排序碰撞；
+        - 若系统时钟回拨或同一微秒内被多次调用，会自动顺延 1 微秒，
+          保证当前进程内时间戳严格单调递增；
+        - 输出保持为 timezone-aware ISO-8601 文本，可直接参与字符串排序。
+    """
+    global _LAST_NOW_ISO
+    with _NOW_ISO_LOCK:
+        candidate = datetime.now(timezone.utc).astimezone(timezone.utc)
+        if _LAST_NOW_ISO is not None and candidate <= _LAST_NOW_ISO:
+            candidate = _LAST_NOW_ISO + timedelta(microseconds=1)
+        _LAST_NOW_ISO = candidate
+        return candidate.isoformat(timespec="microseconds")
 
 
 def ensure_parent(path: str | Path) -> Path:

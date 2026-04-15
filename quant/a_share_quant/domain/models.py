@@ -98,12 +98,13 @@ class RunArtifacts:
         - ``component_manifest`` 记录策略/因子/组合/执行等组件指纹，作为后续扩展的正式契约。
     """
 
-    schema_version: int = 5
+    schema_version: int = 6
     entrypoint: str | None = None
     strategy_version: str | None = None
     runtime_mode: str | None = None
     benchmark_initial_value: float | None = None
     report_paths: list[str] = field(default_factory=list)
+    report_artifacts: list[dict[str, Any]] = field(default_factory=list)
     event_log_path: str | None = None
     run_event_summary: dict[str, Any] = field(default_factory=dict)
     artifact_status: str = "PENDING"
@@ -204,6 +205,28 @@ class Bar:
 
 
 @dataclass(slots=True)
+class TargetIntent:
+    """研究/策略运行时输出的中间目标契约。"""
+
+    ts_code: str
+    target_weight: float
+    score: float
+    reason: str
+    source_signal: str
+    runtime_lane: str = "research_backtest"
+    source_run_id: str | None = None
+    constraints: dict[str, Any] = field(default_factory=dict)
+
+    def to_target_position(self) -> "TargetPosition":
+        return TargetPosition(
+            ts_code=self.ts_code,
+            target_weight=self.target_weight,
+            score=self.score,
+            reason=self.reason,
+        )
+
+
+@dataclass(slots=True)
 class TargetPosition:
     """策略输出的目标仓位。"""
 
@@ -211,6 +234,61 @@ class TargetPosition:
     target_weight: float
     score: float
     reason: str
+
+
+@dataclass(slots=True)
+class ExecutionIntent:
+    """研究/策略晋级到 operator lane 的统一执行意图。
+
+    Boundary Behavior:
+        - ``target_positions`` 是 strategy/research 对 operator lane 暴露的唯一目标仓位真相源；
+        - ``promotion_package`` 保留 research 晋级合同，供 paper/live 入口复核兼容性；
+        - ``metadata`` 仅承载追踪/显示信息，不参与正式风控与下单决策。
+    """
+
+    intent_id: str
+    intent_type: str
+    strategy_id: str
+    trade_date: date
+    runtime_mode: str
+    source_run_id: str | None = None
+    account_id: str | None = None
+    target_positions: list[TargetPosition] = field(default_factory=list)
+    promotion_package: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PortfolioDelta:
+    """目标仓位与当前账户状态之间的差额快照。"""
+
+    ts_code: str
+    current_quantity: int
+    target_quantity: int
+    delta_quantity: int
+    target_weight: float
+    score: float
+    price: float | None
+    reason: str
+    side: OrderSide | None = None
+
+
+@dataclass(slots=True)
+class ExecutionIntentPlan:
+    """执行意图落到正式订单前的编排计划。"""
+
+    intent: ExecutionIntent
+    deltas: list[PortfolioDelta] = field(default_factory=list)
+    orders: list[OrderRequest] = field(default_factory=list)
+    source_payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ExecutionIntentSubmissionResult:
+    """执行意图提交后的组合结果。"""
+
+    plan: ExecutionIntentPlan
+    trade_session: TradeSessionResult
 
 
 @dataclass(slots=True)

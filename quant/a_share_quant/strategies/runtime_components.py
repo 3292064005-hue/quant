@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from a_share_quant.domain.models import Bar, Security, TargetPosition
+from a_share_quant.domain.models import Bar, Security, TargetIntent, TargetPosition
 from a_share_quant.strategies.base import StrategyComponentManifest
 
 
@@ -89,16 +89,29 @@ class TopNSelectionSignal:
 class DirectTargetsSignal:
     """兼容历史策略接口的直接目标仓位信号组件。"""
 
-    def build_targets(self, strategy, frame, histories_by_symbol: dict[str, list[Bar]], securities: dict[str, Security]) -> list[TargetPosition]:
+    def build_target_intents(self, strategy, frame, histories_by_symbol: dict[str, list[Bar]], securities: dict[str, Security]) -> list[TargetIntent]:
         if not hasattr(strategy, "generate_targets"):
             raise StrategyRuntimeBindingError(f"策略 {type(strategy).__name__} 未实现 generate_targets()")
-        return list(strategy.generate_targets(histories_by_symbol, frame.trade_date, securities))
+        targets = list(strategy.generate_targets(histories_by_symbol, frame.trade_date, securities))
+        return [
+            TargetIntent(
+                ts_code=item.ts_code,
+                target_weight=item.target_weight,
+                score=item.score,
+                reason=item.reason,
+                source_signal="builtin.direct_targets",
+            )
+            for item in targets
+        ]
+
+    def build_targets(self, strategy, frame, histories_by_symbol: dict[str, list[Bar]], securities: dict[str, Security]) -> list[TargetPosition]:
+        return [item.to_target_position() for item in self.build_target_intents(strategy, frame, histories_by_symbol, securities)]
 
 
 class ResearchSignalSnapshotComponent:
     """把 research signal_snapshot 产物转换为回测目标仓位。"""
 
-    def build_targets(self, payload: dict[str, Any], *, active_securities: dict[str, Security]) -> list[TargetPosition]:
+    def build_target_intents(self, payload: dict[str, Any], *, active_securities: dict[str, Security]) -> list[TargetIntent]:
         selected_symbols = payload.get("selected_symbols")
         if not isinstance(selected_symbols, list):
             raise StrategyRuntimeBindingError("research signal_snapshot 缺少 selected_symbols 列表")
@@ -121,21 +134,24 @@ class ResearchSignalSnapshotComponent:
             normalized_weights = [max(weight, 0.0) / total_weight for weight in explicit_weights]
         else:
             normalized_weights = [1.0 / len(filtered)] * len(filtered)
-        targets: list[TargetPosition] = []
+        targets: list[TargetIntent] = []
         for item, weight in zip(filtered, normalized_weights, strict=True):
             score = float(item.get("score", 0.0) or 0.0)
             ts_code = str(item["ts_code"])
             targets.append(
-                TargetPosition(
+                TargetIntent(
                     ts_code=ts_code,
                     target_weight=weight,
                     score=score,
                     reason=f"research signal_snapshot::{payload.get('signal_type', 'unknown')}",
+                    source_signal="research.signal_snapshot",
+                    source_run_id=payload.get("research_run_id"),
                 )
             )
         return targets
 
-
+    def build_targets(self, payload: dict[str, Any], *, active_securities: dict[str, Security]) -> list[TargetPosition]:
+        return [item.to_target_position() for item in self.build_target_intents(payload, active_securities=active_securities)]
 
 
 class BypassedPortfolioComponent:
@@ -146,6 +162,9 @@ class BypassedPortfolioComponent:
         - 若误被直接调用，会原样返回输入的目标仓位序列。
     """
 
+    def build_target_intents(self, targets: Iterable[TargetIntent], *, strategy) -> list[TargetIntent]:
+        return list(targets)
+
     def build_targets(self, targets: Iterable[TargetPosition], *, strategy) -> list[TargetPosition]:
         return list(targets)
 
@@ -153,7 +172,7 @@ class BypassedPortfolioComponent:
 class EqualWeightTopNPortfolio:
     """把证券选择结果转换为等权目标仓位。"""
 
-    def build_targets(self, selections: Iterable[RankedSelection], *, strategy) -> list[TargetPosition]:
+    def build_target_intents(self, selections: Iterable[RankedSelection], *, strategy) -> list[TargetIntent]:
         ordered = list(selections)
         if not ordered:
             return []
@@ -161,14 +180,18 @@ class EqualWeightTopNPortfolio:
         lookback = getattr(strategy, "lookback", None)
         reason_prefix = f"{lookback}日动量排名" if lookback else "组件化选股排名"
         return [
-            TargetPosition(
+            TargetIntent(
                 ts_code=item.ts_code,
                 target_weight=weight,
                 score=item.score,
                 reason=reason_prefix,
+                source_signal="builtin.top_n_selection",
             )
             for item in ordered
         ]
+
+    def build_targets(self, selections: Iterable[RankedSelection], *, strategy) -> list[TargetPosition]:
+        return [item.to_target_position() for item in self.build_target_intents(selections, strategy=strategy)]
 
 
 @dataclass(slots=True)
@@ -196,6 +219,8 @@ class StrategyExecutionRuntime:
     signal_component: Any
     portfolio_component: Any
     research_signal_payload: dict[str, Any] | None = None
+    plugin_manager: Any | None = None
+    plugin_context: Any | None = None
 
     def required_history_bars(self, strategy) -> int:
         factor_component = self.factor_component
@@ -210,15 +235,27 @@ class StrategyExecutionRuntime:
             return bool(strategy.should_rebalance(eligible_trade_index))
         return True
 
-    def generate_targets(self, strategy, frame) -> list[TargetPosition]:
+    def generate_target_intents(self, strategy, frame) -> list[TargetIntent]:
         histories_by_symbol, securities = self.universe_component.select(frame)
         signal_name = self.manifest.signal_component
         if signal_name == "builtin.direct_targets":
-            return self.signal_component.build_targets(strategy, frame, histories_by_symbol, securities)
-        if signal_name == "research.signal_snapshot":
+            intents = self.signal_component.build_target_intents(strategy, frame, histories_by_symbol, securities)
+        elif signal_name == "research.signal_snapshot":
             if self.research_signal_payload is None:
                 raise StrategyRuntimeBindingError("research.signal_snapshot 已绑定但缺少 research signal payload")
-            return self.signal_component.build_targets(self.research_signal_payload, active_securities=securities)
-        factor_values = self.factor_component.compute(histories_by_symbol, strategy=strategy)
-        selections = self.signal_component.select(factor_values, strategy=strategy)
-        return self.portfolio_component.build_targets(selections, strategy=strategy)
+            intents = self.signal_component.build_target_intents(self.research_signal_payload, active_securities=securities)
+        else:
+            factor_values = self.factor_component.compute(histories_by_symbol, strategy=strategy)
+            selections = self.signal_component.select(factor_values, strategy=strategy)
+            intents = self.portfolio_component.build_target_intents(selections, strategy=strategy)
+        if self.plugin_manager is not None:
+            self.plugin_manager.emit_target_intents_generated(
+                self.plugin_context,
+                getattr(strategy, "strategy_id", type(strategy).__name__),
+                list(intents),
+                {"signal_component": signal_name, "intent_count": len(intents), "runtime_lane": "research_backtest"},
+            )
+        return list(intents)
+
+    def generate_targets(self, strategy, frame) -> list[TargetPosition]:
+        return [item.to_target_position() for item in self.generate_target_intents(strategy, frame)]

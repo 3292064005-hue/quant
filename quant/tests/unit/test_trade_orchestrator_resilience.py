@@ -313,6 +313,39 @@ class _PollingBroker:
         return list(self.fills)
 
 
+class _TerminalPollingBroker(_PollingBroker):
+    def __init__(self, *, terminal_status: OrderStatus, message: str) -> None:
+        super().__init__()
+        self._terminal_status = terminal_status
+        self._message = message
+
+    def poll_execution_reports(self, *, account_id=None, broker_order_ids=None):
+        if self._synced:
+            return []
+        self._synced = True
+        matched_broker_order_id = (broker_order_ids or ["broker_order_sync_1"])[0]
+        return [
+            ExecutionReport(
+                report_id=f"report_{self._terminal_status.value.lower()}_1",
+                order_id="broker_order_sync_1",
+                trade_date=date(2024, 1, 2),
+                status=self._terminal_status,
+                requested_quantity=100,
+                filled_quantity=0,
+                remaining_quantity=100,
+                message=self._message,
+                broker_order_id=matched_broker_order_id,
+                account_id=account_id or self._account_id,
+            )
+        ]
+
+    def query_orders(self):
+        if self.orders and self._synced:
+            self.orders[0].status = self._terminal_status
+            self.orders[0].last_error = self._message
+        return list(self.orders)
+
+
 def _build_service_with_external_id_broker(tmp_path: Path) -> tuple[TradeOrchestratorService, OrderRepository, ExecutionSessionRepository]:
     config = _build_config(tmp_path)
     store = SQLiteStore(config.database.path)
@@ -469,6 +502,64 @@ def _build_service_with_polling_broker(tmp_path: Path) -> tuple[TradeOrchestrato
     order_repository = OrderRepository(store)
     execution_session_repository = ExecutionSessionRepository(store)
     broker = _PollingBroker()
+    reconciliation_service = TradeReconciliationService(
+        broker=broker,
+        order_repository=order_repository,
+        audit_repository=AuditRepository(store),
+        execution_session_repository=execution_session_repository,
+    )
+    service = TradeOrchestratorService(
+        config=config,
+        broker=broker,
+        market_repository=market_repository,
+        order_repository=order_repository,
+        audit_repository=AuditRepository(store),
+        execution_session_repository=execution_session_repository,
+        reconciliation_service=reconciliation_service,
+    )
+    return service, order_repository, execution_session_repository
+
+
+def _build_service_with_terminal_polling_broker(tmp_path: Path, *, terminal_status: OrderStatus, message: str) -> tuple[TradeOrchestratorService, OrderRepository, ExecutionSessionRepository]:
+    config = _build_config(tmp_path)
+    store = SQLiteStore(config.database.path)
+    store.init_schema(load_schema_sql())
+    market_repository = MarketRepository(store)
+    market_repository.upsert_securities(
+        {
+            "600000.SH": Security(
+                ts_code="600000.SH",
+                name="PF Bank",
+                exchange="SSE",
+                board="MAIN",
+                is_st=False,
+                status="L",
+                list_date=None,
+                delist_date=None,
+            )
+        }
+    )
+    market_repository.upsert_bars(
+        [
+            Bar(
+                ts_code="600000.SH",
+                trade_date=date(2024, 1, 2),
+                open=10.0,
+                high=10.8,
+                low=9.8,
+                close=10.5,
+                volume=1000.0,
+                amount=10500.0,
+                pre_close=10.0,
+                suspended=False,
+                limit_up=False,
+                limit_down=False,
+            )
+        ]
+    )
+    order_repository = OrderRepository(store)
+    execution_session_repository = ExecutionSessionRepository(store)
+    broker = _TerminalPollingBroker(terminal_status=terminal_status, message=message)
     reconciliation_service = TradeReconciliationService(
         broker=broker,
         order_repository=order_repository,
@@ -969,3 +1060,145 @@ def test_trade_orchestrator_sync_latest_open_session_ignores_partially_completed
         assert "当前没有需要同步事件的交易会话" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected ValueError")
+
+
+def test_trade_orchestrator_does_not_downgrade_successful_submit_when_audit_write_fails(tmp_path: Path, monkeypatch) -> None:
+    service, order_repository, execution_session_repository = _build_service(tmp_path)
+
+    def _audit_boom(*args, **kwargs):
+        raise RuntimeError("audit sink unavailable")
+
+    monkeypatch.setattr(service.audit_repository, "write", _audit_boom)
+
+    order = OrderRequest(
+        order_id="order_demo_audit_fail_1",
+        trade_date=date(2024, 1, 2),
+        strategy_id="operator.manual",
+        ts_code="600000.SH",
+        side=OrderSide.BUY,
+        price=10.5,
+        quantity=100,
+        reason="audit-best-effort-test",
+    )
+
+    result = service.submit_orders([order], command_source="test", requested_by="tester")
+
+    assert result.summary.status == TradeSessionStatus.COMPLETED
+    stored_orders = order_repository.list_orders(execution_session_id=result.summary.session_id, limit=10)
+    assert len(stored_orders) == 1
+    event_types = [event.event_type for event in execution_session_repository.list_events(result.summary.session_id)]
+    assert "AUDIT_WRITE_FAILED" in event_types
+    assert "RECOVERY_REQUIRED" not in event_types
+
+
+
+def test_trade_orchestrator_counts_submitted_orders_for_broker_lifecycle_statuses(tmp_path: Path) -> None:
+    service, _, _ = _build_service(tmp_path)
+
+    orders = [
+        OrderRequest(
+            order_id="submitted_1",
+            trade_date=date(2024, 1, 2),
+            strategy_id="operator.manual",
+            ts_code="600000.SH",
+            side=OrderSide.BUY,
+            price=10.5,
+            quantity=100,
+            reason="submitted-count-test",
+            status=OrderStatus.SUBMITTED,
+        ),
+        OrderRequest(
+            order_id="cancel_rejected_1",
+            trade_date=date(2024, 1, 2),
+            strategy_id="operator.manual",
+            ts_code="600000.SH",
+            side=OrderSide.BUY,
+            price=10.5,
+            quantity=100,
+            reason="submitted-count-test",
+            status=OrderStatus.CANCEL_REJECTED,
+        ),
+        OrderRequest(
+            order_id="expired_1",
+            trade_date=date(2024, 1, 2),
+            strategy_id="operator.manual",
+            ts_code="600000.SH",
+            side=OrderSide.BUY,
+            price=10.5,
+            quantity=100,
+            reason="submitted-count-test",
+            status=OrderStatus.EXPIRED,
+        ),
+        OrderRequest(
+            order_id="broker_id_1",
+            trade_date=date(2024, 1, 2),
+            strategy_id="operator.manual",
+            ts_code="600000.SH",
+            side=OrderSide.BUY,
+            price=10.5,
+            quantity=100,
+            reason="submitted-count-test",
+            status=OrderStatus.CREATED,
+            broker_order_id="broker-order-1",
+        ),
+        OrderRequest(
+            order_id="not_submitted_1",
+            trade_date=date(2024, 1, 2),
+            strategy_id="operator.manual",
+            ts_code="600000.SH",
+            side=OrderSide.BUY,
+            price=10.5,
+            quantity=100,
+            reason="submitted-count-test",
+            status=OrderStatus.CREATED,
+        ),
+    ]
+
+    assert service.session_write_service._count_submitted_orders(orders) == 4
+
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "expected_event_type"),
+    [
+        (OrderStatus.CANCELLED, "ORDER_CANCELLED"),
+        (OrderStatus.CANCEL_REJECTED, "ORDER_CANCEL_REJECTED"),
+        (OrderStatus.EXPIRED, "ORDER_EXPIRED"),
+    ],
+)
+def test_trade_orchestrator_sync_session_events_closes_terminal_non_fill_statuses(
+    tmp_path: Path, terminal_status: OrderStatus, expected_event_type: str
+) -> None:
+    service, order_repository, execution_session_repository = _build_service_with_terminal_polling_broker(
+        tmp_path, terminal_status=terminal_status, message=f"{terminal_status.value.lower()} by poll"
+    )
+
+    order = OrderRequest(
+        order_id=f"order_terminal_{terminal_status.value.lower()}",
+        trade_date=date(2024, 1, 2),
+        strategy_id="operator.manual",
+        ts_code="600000.SH",
+        side=OrderSide.BUY,
+        price=10.5,
+        quantity=100,
+        reason="terminal-status-test",
+    )
+
+    submit_result = service.submit_orders([order], command_source="test", requested_by="tester", account_id="demo-account-2")
+    assert submit_result.summary.status == TradeSessionStatus.RECOVERY_REQUIRED
+
+    sync_result = service.sync_session_events(submit_result.summary.session_id, requested_by="tester")
+    assert sync_result.summary.status == TradeSessionStatus.COMPLETED
+    assert sync_result.summary.last_synced_at is not None
+
+    synced_orders = order_repository.list_orders(
+        execution_session_id=submit_result.summary.session_id, account_id="demo-account-2", limit=10
+    )
+    assert len(synced_orders) == 1
+    assert synced_orders[0]["status"] == terminal_status.value
+
+    event_types = [event.event_type for event in execution_session_repository.list_events(submit_result.summary.session_id)]
+    assert expected_event_type in event_types
+    assert "RECOVERY_REQUIRED" not in event_types[-2:]

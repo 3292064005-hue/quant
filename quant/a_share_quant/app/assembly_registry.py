@@ -22,23 +22,65 @@ from a_share_quant.strategies.runtime_components import (
 from a_share_quant.workflows import BacktestWorkflow, OperatorTradeWorkflow, ReplayWorkflow, ReportWorkflow, ResearchWorkflow
 
 
+def create_plugin_manager(context: AppContext) -> None:
+    """按配置构造并注册 plugin manager，但暂不执行 configure。
+
+    Notes:
+        - plugin manager 需要在 service/workflow 构造前进入上下文，避免 plugin-aware service 在初始化时拿到 ``None``；
+        - 具体 ``configure_all`` 延后到服务、provider、workflow 全部装配完成后执行。
+    """
+    if context.plugin_manager is None:
+        context.plugin_manager = build_plugin_manager(context.config)
+
+
+
+def configure_plugin_manager(context: AppContext) -> None:
+    """在正式装配完成后执行插件 configure/context_ready。"""
+    if context.plugin_manager is None:
+        return
+    context.plugin_manager.configure_all(context)
+
+
+
 def install_plugin_manager(context: AppContext) -> None:
-    """按配置发现、注册并配置插件。"""
-    plugin_manager = build_plugin_manager(context.config)
-    plugin_manager.configure_all(context)
-    context.plugin_manager = plugin_manager
-    bind_plugin_manager_to_workflows(context)
+    """兼容旧入口：完整安装 plugin manager。"""
+    create_plugin_manager(context)
+    bind_plugin_manager_to_runtime(context)
+    configure_plugin_manager(context)
+
+
+
+def bind_plugin_manager_to_runtime(context: AppContext) -> None:
+    """把 plugin manager 回填到 service/workflow 等 plugin-aware 运行时对象。
+
+    Boundary Behavior:
+        - 允许在 service/workflow 已构造后执行回填，避免官方装配路径因为顺序漂移导致 hook 失效；
+        - 仅对显式声明 ``bind_plugin_manager`` 的对象执行绑定，不对普通组件做隐式魔法注入。
+    """
+    plugin_manager = context.plugin_manager
+    if plugin_manager is None:
+        return
+    targets: list[Any] = []
+    for candidate in (
+        context.strategy_service,
+        context.trade_orchestrator_service,
+        context.operator_supervisor_service,
+    ):
+        if candidate is not None:
+            targets.append(candidate)
+    if context.workflow_registry is not None:
+        for entry in context.workflow_registry.list_entries():
+            targets.append(entry.component)
+    for target in targets:
+        binder = getattr(target, "bind_plugin_manager", None)
+        if callable(binder):
+            binder(plugin_manager)
 
 
 
 def bind_plugin_manager_to_workflows(context: AppContext) -> None:
-    """在 plugin_manager 安装完成后回填到已注册 workflow。"""
-    if context.workflow_registry is None or context.plugin_manager is None:
-        return
-    for entry in context.workflow_registry.list_entries():
-        workflow = entry.component
-        if hasattr(workflow, "bind_plugin_manager"):
-            workflow.bind_plugin_manager(context.plugin_manager)
+    """兼容旧命名；当前已升级为完整 runtime 绑定。"""
+    bind_plugin_manager_to_runtime(context)
 
 
 
@@ -363,14 +405,19 @@ def register_workflows(context: AppContext, profile: RuntimeLaneProfile) -> None
     if context.trade_orchestrator_service is not None and profile.supports_operator_commands:
         context.workflow_registry.register(
             "workflow.operator_trade",
-            OperatorTradeWorkflow(context.trade_orchestrator_service, context, plugin_manager=plugin_manager),
-            metadata={"workflow_type": "operator_trade", "input_contract": "order_requests", "output_contract": "trade_session_result"},
+            OperatorTradeWorkflow(
+                context.trade_orchestrator_service,
+                context,
+                supervisor_service=context.operator_supervisor_service,
+                plugin_manager=plugin_manager,
+            ),
+            metadata={"workflow_type": "operator_trade", "input_contract": "order_requests|execution_intent", "output_contract": "trade_session_result|execution_intent_submission"},
             descriptor=ComponentDescriptor(
                 name="workflow.operator_trade",
                 component_type="workflow",
                 contract_kind="runtime_instance",
-                input_contract="order_requests",
-                output_contract="trade_session_result",
+                input_contract="order_requests|execution_intent",
+                output_contract="trade_session_result|execution_intent_submission",
                 callable_path="a_share_quant.workflows.operator_trade_workflow:OperatorTradeWorkflow.submit_orders",
                 tags=("workflow", "operator", "trade"),
             ),

@@ -1,6 +1,6 @@
 # A 股量化研究与交易工作站
 
-当前发布版本：`0.5.5`
+当前发布版本：`0.5.6`
 
 本工程当前定位为 **research/backtest 正式主链 + paper/live operator command 主链 + 桌面只读 operator plane** 的量化工作站底座，聚焦三条主链闭环：
 
@@ -102,7 +102,7 @@ python scripts/generate_report.py --config configs/app.yaml --run-id run_xxxxxxx
 
 ### 3.6 运行前健康检查
 
-检查当前配置对应的数据源 / broker / 可选 UI 运行时是否具备。输出会同时给出 `config_ok / boundary_ok / client_contract_ok / operable_ok` 四层能力状态；当使用 `--strict` 时，只有在全部检查项通过且 `operable_ok=true` 时才返回 0：
+检查当前配置对应的数据源 / broker / 市场数据存储 / 可选 UI 运行时是否具备。输出会同时给出 `config_ok / boundary_ok / client_contract_ok / operable_ok` 四层历史兼容状态；在扩展摘要中还会给出 `acceptance_ok / recovery_ok / minimum_readiness_level`。当使用 `--strict` 时，正式 broker 需要满足当前 profile/runtime 派生出的最小 readiness 要求，而不再只看 `operable_ok=true`：
 
 ```bash
 python scripts/check_runtime.py --config configs/app.yaml --check-ui --strict
@@ -125,7 +125,7 @@ python scripts/research.py --config configs/app.yaml --artifact experiment --csv
 
 示例数据的默认演示参数已收口到 `lookback=3 / top_n=2`，直接运行也会得到非空特征与信号产物。
 
-可选 `--artifact`：`dataset / feature / signal / experiment / experiment-batch / recent-runs`。该入口会正式走 `workflow.research`，并把结果持久化到 `research_runs`。其中 `experiment` 现已区分“1 条用户主记录 + 同 session 的内部 dataset/feature/signal 子步骤”；`experiment-batch` 则以 batch summary 作为唯一主记录，任务级 experiment 与其子步骤统一挂到 batch 主记录下。`recent-runs` 默认只展示主记录，不再被内部步骤或 batch 子任务污染。
+可选 `--artifact`：`dataset / feature / signal / experiment / experiment-batch / recent-runs`。该入口会正式走 `workflow.research`。其中 `dataset / feature / signal` 现在默认只返回 cache/query 结果，不进入正式 `research_runs`；只有显式传入 `--record` 或配置 `research.record_query_runs=true` 时才会落正式实验记录。`experiment` 现已区分“1 条用户主记录 + 同 session 的内部 dataset/feature/signal 子步骤”；`experiment-batch` 则以 batch summary 作为唯一主记录，任务级 experiment 与其子步骤统一挂到 batch 主记录下。`recent-runs` 默认只展示主记录，不再被内部步骤、batch 子任务或查询型快照污染。
 
 ### 3.8 启动桌面只读运营面板与 operator 命令入口
 
@@ -135,19 +135,23 @@ python scripts/launch_ui.py --config configs/app.yaml
 # paper/live lane 仓内自带 acceptance profile（默认配置即指向该 demo profile）
 python scripts/operator_snapshot.py
 python scripts/operator_submit_order.py --symbol 600000.SH --side BUY --price 10.50 --quantity 100 --trade-date 2026-01-05
+# research/backtest 产出的 signal_snapshot 进入 operator 正式执行链
+python scripts/operator_submit_signal.py --research-run-id <signal_run_id> --trade-date 2026-01-05
 
 # paper/live lane 对接真实 broker（显式覆盖配置或 client factory）
 python scripts/operator_snapshot.py --config configs/operator_paper_trade.yaml --broker-client-factory your.module:create_client
 python scripts/operator_submit_order.py   --config configs/operator_paper_trade.yaml   --broker-client-factory your.module:create_client   --symbol 600000.SH --side BUY --price 10.50 --quantity 100 --trade-date 2026-01-05 --approved
 ```
 
-当前入口只启动**桌面只读运营面板**：展示配置摘要、运行时检查结果、最近导入/最近回测/质量事件的只读运营摘要与桌面边界说明；运行时检查结果与 CLI `check_runtime` 走同一套构造逻辑，并显式展示四层能力状态，不会再出现 UI 误绿灯。桌面层当前还增加了版本化 `ui_*` projection/read-model，避免直接消费 registry/raw result 导致字段错位。该入口仅支持官方范围 `research_backtest + mock`；paper/live 的只读查询请使用 `operator_snapshot`。
+当前入口只启动**桌面只读运营面板**：展示配置摘要、运行时检查结果、最近导入/最近回测/质量事件的只读运营摘要与桌面边界说明；运行时检查结果与 CLI `check_runtime` 走同一套构造逻辑，并显式展示四层能力状态，不会再出现 UI 误绿灯。桌面层当前只消费版本化 `ui_*` projection/read-model；原始 snapshot 仅保留为兼容层，避免 panel 继续直接绑定 registry/raw result 导致字段错位。该入口仅支持官方范围 `distribution_profile=workstation + research_backtest + mock`；paper/live 的只读查询请使用 `operator_snapshot`。
 
 正式 `operator_submit_order` 命令链当前已额外收口三点：1）`order_id` 不再只靠 CLI 保证唯一；服务层会对空值、批内重复、历史冲突 ID 自动重签发，仓储层也会拒绝拿既有 `order_id` 改写另一笔订单，从而避免审计记录被跨会话覆盖；2）pre-trade reject 也会写入正式 `orders` 表，而不是只存在于事件流；3）paper/live operator 预交易校验与仓内共享 `RiskEngine` 对齐，`lot size / ST / 停牌 / 涨跌停` 等规则不再只停留在 research/backtest 侧。
 
+当前 paper/live 写路径已明确拆成两类：`operator_submit_order` 负责人工命令单；`operator_submit_signal` 负责把 research `signal_snapshot` 转成统一 `ExecutionIntent -> PortfolioDelta -> OrderRequest` 后，再进入同一条 operator 编排链。这样 research/backtest 与 operator lane 共享的是中间执行契约，而不是把研究输出直接伪装成手工订单。为避免误把“最近一次信号”当成目标执行对象，`operator_submit_signal` 现在要求显式传入 `--research-run-id`，不再允许隐式回退到最新 snapshot。
+
 注意：`configs/app.yaml` 默认是 `research_backtest + mock`，不能直接用于 operator 命令。当前 operator CLI 默认已切到仓内自带 acceptance profile `configs/operator_paper_trade_demo.yaml`；若要接入真实 broker，请改用 `configs/operator_paper_trade.yaml` 并显式提供 `broker.client_factory`（或通过 `--broker-client-factory` 覆盖）。
 
-若当前环境未安装 `PySide6`，脚本会在启动前明确报错并给出安装提示，而不是在业务链路中途失败。运行态依赖现已与开发依赖拆分：生产/容器安装使用 `requirements.txt`，开发门禁使用 `requirements-dev.txt`。
+若当前环境未安装 `PySide6`，脚本会在启动前明确报错并给出安装提示，而不是在业务链路中途失败。运行态依赖仍按 distribution profile 分层：源码树维护 `requirements-core.txt` / `requirements-workstation.txt` / `requirements-production.txt`，开发门禁使用 `requirements-dev.txt`；但单个 clean release 只保留当前发行形态对应的 requirements surface，不承诺在同一发布包内再次裁剪出其他 profile。容器构建与 clean release 都从同一 profile 契约选择 requirements surface，而不是统一回落到 `requirements.txt`。
 
 ### 3.9 运行测试
 
@@ -188,11 +192,31 @@ pytest -q
 - `app.runtime_mode`
   - `research_backtest`：正式研究/回测模式
   - `paper_trade` / `live_trade`：正式 operator trade lane，支持真实 broker 命令链与会话留痕
+- `app.distribution_profile`
+  - `core`：面向 headless 引擎/脚本；默认不提供桌面 UI 入口
+  - `workstation`：默认工作站形态，启用本地 UI/read-model/研究链
+  - `production`：面向严格运行边界；要求 `paper_trade/live_trade + 非 mock broker + strict calendar + 禁止 degraded data + strict contract mapping + require_approval`
+- `research.record_query_runs`
+  - `false`：默认；dataset/feature/signal 查询型产物只走 cache/query，不进入 `research_runs`
+  - `true`：把查询型产物也纳入正式实验记录
+- 源码树维护 `requirements-core.txt / requirements-workstation.txt / requirements-production.txt / requirements-dev.txt`；clean release 只保留当前 profile 对应的 requirements surface（另可保留 dev/test surface 供仓内验证）
+  - 发行依赖与开发门禁依赖现已按 profile 分层
+  - `a_share_quant/app/distribution_profile_contract.py` 是 profile surface 的单一真相源；`Dockerfile` / `build_clean_release.py` / `verify_release.py` 都从同一契约对齐
+  - `Dockerfile` 通过 `DIST_PROFILE` 选择对应 requirements 文件
+  - `scripts/build_clean_release.py --distribution-profile ...` 会按 profile 裁剪 staging 源树、写入 `distribution_manifest.json`，并把 `pyproject.toml` 改写为对应 release 名称（`a-share-quant-core` / `a-share-quant-workstation` / `a-share-quant-production`）
+  - `scripts/verify_release.py` 现在会校验 manifest 声明的 requirements surface 是否真实存在于 release zip 中
+  - `core` release 会移除 UI / operator demo surface；`production` release 会移除 research/demo surface；三类发布包现在是实体差异发行物，不是仅靠 marker 区分
 - `broker.operation_timeout_seconds`
   - 券商适配器 best-effort 超时
 - `broker.strict_contract_mapping`
   - `true`：第三方 payload 不能严格映射为领域对象时立即失败
   - `false`：进入 best-effort 兼容模式，账户/持仓/成交会尽量回退为可用领域对象，并记录 warning
+- `broker.acceptance_manifest_path`
+  - 指向 broker acceptance JSON，表达 submit / sync / reconcile / restart recovery 的验收证据
+  - `production` profile 现在要求显式提供该文件；仓内 demo profile 已自带 `configs/broker/qmt_demo_acceptance.json`
+- `broker.required_readiness_level`
+  - 可选显式覆盖最小 readiness gate；默认由 `runtime_mode + distribution_profile` 自动派生
+  - 支持 `config_validated / boundary_validated / client_contract_validated / operable / staging_accepted / production_accepted`
 - `broker.client_factory`
   - 可选真实 broker 客户端工厂路径，格式 `package.module:callable`
   - 主要用于 `check_runtime` 与未来独立的 paper/live orchestration；research backtest 主链不会消费它
@@ -236,6 +260,7 @@ pytest -q
 - `core/events.py`：已升级为正式事件类型 + 同步 EventBus + `EventJournal` 追加式历史；回测运行事件与 operator/session 事件现在都会镜像进入统一 `runtime_events` 事件流，便于统一回放、摘要与只读查询；跨进程/异步分布式编排仍属后续扩展
 - `providers/` / `workflows/` / `plugins/`：已作为正式边界落地；workflow 注册现受 runtime lane profile 约束，插件支持配置启停与外部发现
 - `plugins/` 已补齐 `configure -> context_ready -> before_workflow_run -> after_workflow_run -> shutdown` 生命周期，workflow 不再只是“注册名字而不消费插件”
+- `plugin_manager` 现在作为基础设施层依赖先进入 `RuntimeAssembly`，再回填 `StrategyService / TradeOrchestratorService / workflow`；官方装配路径不再只保证 workflow hook，可显式保证 service 级 hook 也能命中。
 - `component_registry` 已从纯 metadata 注册升级为“组件对象 + descriptor 契约”双轨，operator plane 可区分 declarative / executable / runtime_instance
 - `benchmark_symbol`：当前默认示例已改为 `600000.SH`，能够与仓内 sample_data 直接对齐生成基准曲线；若后续换成不存在的基准行情，报告会显式只输出策略净值指标
 - `workflow.operator_trade` 已具备正式 `account_id` 作用域、allowlist 校验、CAS 风格 supervisor claim/renew/release 语义、可重复轮询的 `sync_session_events` 事件推进链，以及跨进程 `operator_run_supervisor` / broker `subscribe_execution_reports` 订阅入口；supervisor 现在会周期性续租并记录 `SUPERVISOR_RENEWED`，release 仅在实际释放成功时记录 `SUPERVISOR_RELEASED`，否则写入 `SUPERVISOR_RELEASE_SKIPPED`。会话级 `last_synced_at / last_supervised_at / supervisor_owner / supervisor_lease_expires_at / supervisor_mode / broker_event_cursor` 元信息已进入正式持久化，operator 账户/持仓快照也会在 submit/sync/reconcile 路径中落入正式持久化，并在 `operator_snapshot` 中同时输出 `persisted_account / persisted_positions` 与实时 `account_views`。当前仍未扩展到分布式 supervisor 集群与真实券商 push 环境的生产级验证

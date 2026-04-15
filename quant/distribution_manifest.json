@@ -1,0 +1,15 @@
+{
+  "capabilities": {
+    "enforces_strict_market_contract": false,
+    "profile": "workstation",
+    "supports_headless_scripts": true,
+    "supports_operator_runtime": true,
+    "supports_research_workflow": true,
+    "supports_ui": true
+  },
+  "description": "A-share quantitative research and execution workstation",
+  "distribution_profile": "workstation",
+  "excluded_paths": [],
+  "project_name": "a-share-quant-workstation",
+  "selected_requirements": "requirements-workstation.txt"
+}

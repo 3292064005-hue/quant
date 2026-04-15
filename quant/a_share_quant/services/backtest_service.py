@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from a_share_quant.config.models import AppConfig
+from a_share_quant.core.runtime_checks import check_market_storage_runtime
 from a_share_quant.core.utils import now_iso
 from a_share_quant.domain.models import BacktestResult, BacktestRunStatus, DataLineage, RunArtifacts, TradingCalendarEntry
 from a_share_quant.engines.backtest_engine import BacktestEngine
@@ -64,7 +65,7 @@ class BacktestService:
             )
         bound_signal_source_run_id = (getattr(strategy, "_bound_research_signal_run_id", None) or "").strip() or None
         artifacts = RunArtifacts(
-            schema_version=5,
+            schema_version=6,
             entrypoint=entrypoint,
             strategy_version=self.config.strategy.version,
             runtime_mode=self.config.app.runtime_mode,
@@ -131,6 +132,7 @@ class BacktestService:
                 data_lineage=data_lineage,
                 artifacts=artifacts,
             )
+        self._ensure_market_data_operable(result.data_lineage)
         if self.data_service is not None and result.data_lineage.import_run_id and self.data_service.data_import_repository is not None:
             result.data_quality_events = self.data_service.data_import_repository.list_quality_events(result.data_lineage.import_run_id)
 
@@ -173,6 +175,24 @@ class BacktestService:
         )
         logger.info("回测服务完成 run_id=%s report=%s", result.run_id, report_paths[0])
         return result
+
+    def _ensure_market_data_operable(self, data_lineage: DataLineage) -> None:
+        if self.data_service is None:
+            return
+        market_repository = getattr(self.data_service, "market_repository", None)
+        data_import_repository = getattr(self.data_service, "data_import_repository", None)
+        dataset_version_repository = getattr(self.data_service, "dataset_version_repository", None)
+        if market_repository is None or data_import_repository is None or dataset_version_repository is None:
+            return
+        result = check_market_storage_runtime(
+            self.config.data,
+            market_repository,
+            data_import_repository,
+            dataset_version_repository,
+            data_lineage.dataset_version_id,
+        )
+        if not result.ok:
+            raise ValueError(f"回测数据运行门禁未通过: {result.message}")
 
     def _persist_intermediate_engine_completion(self, result: BacktestResult) -> None:
         """持久化引擎业务完成态。"""

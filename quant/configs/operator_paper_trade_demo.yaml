@@ -1,4 +1,6 @@
 extends: operator_paper_trade.yaml
 broker:
   client_factory: a_share_quant.demo.operator_demo_broker:create_client
+  acceptance_manifest_path: runtime/acceptance/qmt_demo_acceptance.json
+  execute_acceptance_suite: true
   event_source_mode: auto

@@ -10,6 +10,7 @@ _RUNTIME_PATH_FIELDS: tuple[tuple[str, ...], ...] = (
     ("data", "storage_dir"),
     ("data", "reports_dir"),
     ("database", "path"),
+    ("broker", "acceptance_manifest_path"),
 )
 
 
